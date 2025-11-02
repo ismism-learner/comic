@@ -11,7 +11,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QToolBar, QMenuBar,
     QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QListWidget, QListWidgetItem,
     QColorDialog, QDockWidget, QInputDialog, QMessageBox, QFileDialog,
-    QAbstractItemView, QLabel, QFrame, QFontComboBox, QSpinBox
+    QAbstractItemView, QLabel, QFrame, QFontComboBox, QSpinBox, QCheckBox, QSlider, QGroupBox,
+    QGraphicsBlurEffect, QGraphicsScene, QGraphicsTextItem
 )
 from PyQt6.QtGui import (
     QAction, QPainter, QPen, QBrush, QCursor,
@@ -49,16 +50,53 @@ class TextToolsWidget(QWidget):
         self.layout.addWidget(self.font_size_spinbox)
         self.layout.addLayout(style_layout)
 
+        # --- Glow FX UI ---
+        glow_group = QGroupBox("Glow FX")
+        glow_layout = QVBoxLayout()
+
+        self.glow_enable_checkbox = QCheckBox("Enable Glow")
+        glow_layout.addWidget(self.glow_enable_checkbox)
+
+        self.glow_color_button = QPushButton("Glow Color")
+        glow_layout.addWidget(self.glow_color_button)
+
+        glow_layout.addWidget(QLabel("Glow Size:"))
+        self.glow_size_spinbox = QSpinBox()
+        self.glow_size_spinbox.setRange(1, 100)
+        glow_layout.addWidget(self.glow_size_spinbox)
+
+        glow_layout.addWidget(QLabel("Glow Opacity:"))
+        self.glow_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.glow_opacity_slider.setRange(0, 100)
+        glow_layout.addWidget(self.glow_opacity_slider)
+
+        glow_group.setLayout(glow_layout)
+        self.layout.addWidget(glow_group)
+        # --------------------
+
         self.layout.addStretch()
         self.disable_controls()
 
     def set_canvas(self, canvas):
         self.canvas = canvas
         self.add_text_button.clicked.connect(lambda: self.canvas.add_text_item(self.canvas.rect().center()))
+        # Font properties
         self.font_combo.currentFontChanged.connect(self.on_font_property_changed)
         self.font_size_spinbox.valueChanged.connect(self.on_font_property_changed)
         self.bold_button.clicked.connect(self.on_font_property_changed)
         self.italic_button.clicked.connect(self.on_font_property_changed)
+        # Glow properties
+        self.glow_enable_checkbox.clicked.connect(self.on_glow_property_changed)
+        self.glow_color_button.clicked.connect(self.on_glow_color_changed)
+        self.glow_size_spinbox.valueChanged.connect(self.on_glow_property_changed)
+        self.glow_opacity_slider.valueChanged.connect(self.on_glow_property_changed)
+
+    def on_glow_color_changed(self):
+        if not self.canvas or not self.canvas.selected_item_id: return
+        color = QColorDialog.getColor()
+        if color.isValid():
+            self.glow_color_button.setStyleSheet(f"background-color: {color.name()}")
+            self.on_glow_property_changed()
 
     def on_font_property_changed(self):
         if not self.canvas or not self.canvas.selected_item_id:
@@ -74,6 +112,29 @@ class TextToolsWidget(QWidget):
 
         self.canvas.update_selected_text_item_font(font)
 
+    def on_glow_property_changed(self):
+        if not self.canvas or not self.canvas.selected_item_id:
+            return
+        selected_item = self.canvas.get_item_by_id(self.canvas.selected_item_id)
+        if not selected_item or selected_item['type'] != 'text':
+            return
+
+        glow_fx_data = {
+            'enabled': self.glow_enable_checkbox.isChecked(),
+            'color': self.get_color_from_button(self.glow_color_button),
+            'size': self.glow_size_spinbox.value(),
+            'opacity': self.glow_opacity_slider.value() / 100.0
+        }
+        self.canvas.update_selected_text_item_glow(glow_fx_data)
+
+    def get_color_from_button(self, button):
+        # A bit of a hack to get the QColor from the stylesheet
+        style = button.styleSheet()
+        if "background-color" in style:
+            color_name = style.split(":")[-1].strip()
+            return QColor(color_name)
+        return QColor(255, 255, 0) # Default if not set
+
     def update_controls(self, item):
         if item and item['type'] == 'text':
             self.enable_controls()
@@ -84,36 +145,94 @@ class TextToolsWidget(QWidget):
             self.font_size_spinbox.blockSignals(True)
             self.bold_button.blockSignals(True)
             self.italic_button.blockSignals(True)
+            self.glow_enable_checkbox.blockSignals(True)
+            self.glow_color_button.blockSignals(True)
+            self.glow_size_spinbox.blockSignals(True)
+            self.glow_opacity_slider.blockSignals(True)
 
             self.font_combo.setCurrentFont(font)
             self.font_size_spinbox.setValue(font.pointSize() if font.pointSize() > 0 else 12)
             self.bold_button.setChecked(font.bold())
             self.italic_button.setChecked(font.italic())
 
+            glow_fx = item.get('glow_fx', {})
+            self.glow_enable_checkbox.setChecked(glow_fx.get('enabled', False))
+            glow_color = glow_fx.get('color', QColor(255,255,0))
+            self.glow_color_button.setStyleSheet(f"background-color: {glow_color.name()}")
+            self.glow_size_spinbox.setValue(glow_fx.get('size', 10))
+            self.glow_opacity_slider.setValue(int(glow_fx.get('opacity', 1.0) * 100))
+
             self.font_combo.blockSignals(False)
             self.font_size_spinbox.blockSignals(False)
             self.bold_button.blockSignals(False)
             self.italic_button.blockSignals(False)
+            self.glow_enable_checkbox.blockSignals(False)
+            self.glow_color_button.blockSignals(False)
+            self.glow_size_spinbox.blockSignals(False)
+            self.glow_opacity_slider.blockSignals(False)
         else:
             self.disable_controls()
 
     def enable_controls(self):
-        for w in [self.font_combo, self.font_size_spinbox, self.bold_button, self.italic_button]:
+        controls = [
+            self.font_combo, self.font_size_spinbox, self.bold_button, self.italic_button,
+            self.glow_enable_checkbox, self.glow_color_button, self.glow_size_spinbox, self.glow_opacity_slider
+        ]
+        for w in controls:
             w.setEnabled(True)
 
     def disable_controls(self):
-        for w in [self.font_combo, self.font_size_spinbox, self.bold_button, self.italic_button]:
+        controls = [
+            self.font_combo, self.font_size_spinbox, self.bold_button, self.italic_button,
+            self.glow_enable_checkbox, self.glow_color_button, self.glow_size_spinbox, self.glow_opacity_slider
+        ]
+        for w in controls:
             w.setEnabled(False)
 
 class CharacterManager(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.canvas = None
         self.characters = {}
         self.current_character = None
         self.selected_color = QColor(Qt.GlobalColor.black)
         self._setup_ui()
+
+    def set_canvas(self, canvas):
+        self.canvas = canvas
+        self.dialogue_edit.textChanged.connect(self.on_dialogue_changed)
+
+    def on_dialogue_changed(self, text):
+        if self.canvas:
+            self.canvas.update_selected_text_item_content(text)
+
     def _setup_ui(self):
-        self.layout = QVBoxLayout(self); self.char_list = QListWidget(); self.char_list.itemClicked.connect(self.select_character); self.name_input = QLineEdit(); self.name_input.setPlaceholderText("Character Name"); self.color_button = QPushButton("Choose Color"); self.color_button.clicked.connect(self.choose_color); self.add_button = QPushButton("Add Character"); self.add_button.clicked.connect(self.add_character); self.layout.addWidget(self.char_list); self.layout.addWidget(self.name_input); self.layout.addWidget(self.color_button); self.layout.addWidget(self.add_button)
+        self.layout = QVBoxLayout(self)
+        self.char_list = QListWidget()
+        self.char_list.itemClicked.connect(self.select_character)
+        self.layout.addWidget(self.char_list)
+
+        # Dialogue editing section
+        self.dialogue_label = QLabel("Dialogue:")
+        self.dialogue_edit = QLineEdit()
+        self.layout.addWidget(self.dialogue_label)
+        self.layout.addWidget(self.dialogue_edit)
+        self.dialogue_label.hide()
+        self.dialogue_edit.hide()
+
+        # Character creation section
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("Character Name")
+        self.color_button = QPushButton("Choose Color")
+        self.color_button.clicked.connect(self.choose_color)
+        self.add_button = QPushButton("Add Character")
+        self.add_button.clicked.connect(self.add_character)
+
+        self.layout.addWidget(self.name_input)
+        self.layout.addWidget(self.color_button)
+        self.layout.addWidget(self.add_button)
+        self.layout.addStretch()
+
     def choose_color(self):
         color = QColorDialog.getColor();
         if color.isValid(): self.selected_color = color; self.color_button.setStyleSheet(f"background-color: {color.name()}")
@@ -128,6 +247,20 @@ class CharacterManager(QWidget):
     def load_characters(self, characters_data):
         self.clear_characters()
         for name, color_hex in characters_data.items(): color = QColor(color_hex); self.characters[name] = color; item = QListWidgetItem(name); item.setForeground(QBrush(color)); self.char_list.addItem(item)
+
+    def update_dialogue_editor(self, selected_item):
+        # Block signals to prevent feedback loops when setting text
+        self.dialogue_edit.blockSignals(True)
+        if selected_item and selected_item['type'] == 'text':
+            self.dialogue_label.show()
+            self.dialogue_edit.show()
+            self.dialogue_edit.setText(selected_item['text'])
+        else:
+            self.dialogue_label.hide()
+            self.dialogue_edit.hide()
+            self.dialogue_edit.clear()
+        self.dialogue_edit.blockSignals(False)
+
 class RembgThread(QThread):
     finished = pyqtSignal(bytes)
     def __init__(self, input_bytes): super().__init__(); self.input_bytes = input_bytes
@@ -255,6 +388,7 @@ class LayerManager(QWidget):
         self.layer_list.blockSignals(False)
 
 class Canvas(QWidget):
+    selectionChanged = pyqtSignal(object) # Signal to emit when selection changes
     MIME_TYPE = "application/x-comic-creator-image"
     def __init__(self, parent=None, character_manager=None, layer_manager=None, page_manager=None, text_tools=None):
         super().__init__(parent)
@@ -375,12 +509,15 @@ class Canvas(QWidget):
         if 0 <= index < len(self.pages): self.current_page_index = index; self.set_selected_item_id(None); self.edit_mode_parent_id = None; self.page_manager.update_page_list(); self.update()
 
     def set_selected_item_id(self, item_id):
+        if self.selected_item_id == item_id: # Avoid redundant signals
+            return
         self.selected_item_id = item_id
         selected_item = self.get_item_by_id(item_id)
         if self.text_tools:
             self.text_tools.update_controls(selected_item)
         self._update_layer_view()
         self.update()
+        self.selectionChanged.emit(selected_item) # Emit the signal
 
     def update_selected_text_item_font(self, font):
         if not self.selected_item_id: return
@@ -390,6 +527,28 @@ class Canvas(QWidget):
         # Recalculate bounding rect based on new font
         metrics = QFontMetrics(font)
         item['rect'] = metrics.boundingRect(item['rect'], Qt.TextFlag.TextWordWrap, item['text'])
+        self.update()
+
+    def update_selected_text_item_content(self, text):
+        if not self.selected_item_id: return
+        item = self.get_item_by_id(self.selected_item_id)
+        if not item or item['type'] != 'text': return
+
+        item['text'] = text
+        font = item.get('font', QFont())
+        metrics = QFontMetrics(font)
+        # We need to recalculate the bounding rect as the text content changes
+        new_rect = metrics.boundingRect(QRect(item['rect'].topLeft(), QSize(item['rect'].width(), 5000)), Qt.TextFlag.TextWordWrap, text)
+        item['rect'] = new_rect
+        self._update_layer_view()
+        self.update()
+
+    def update_selected_text_item_glow(self, glow_fx_data):
+        if not self.selected_item_id: return
+        item = self.get_item_by_id(self.selected_item_id)
+        if not item or item['type'] != 'text': return
+
+        item['glow_fx'] = glow_fx_data
         self.update()
 
     def _update_layer_view(self): self.layer_manager.update_layers(self.get_current_page_items(), self.selected_item_id)
@@ -477,7 +636,13 @@ class Canvas(QWidget):
         item_data = {
             'text': text,
             'color': self.character_manager.get_current_character_color(),
-            'font': font
+            'font': font,
+            'glow_fx': {
+                'enabled': False,
+                'color': QColor(255, 255, 0, 255), # Default to yellow
+                'size': 10,
+                'opacity': 1.0
+            }
         }
         item_id, new_text_item = self._create_item('text', rect, item_data)
 
@@ -588,10 +753,62 @@ class Canvas(QWidget):
             painter.restore()
         elif item['type'] == 'image': painter.drawPixmap(item['rect'], item['pixmap'])
         elif item['type'] == 'text':
-            font = item.get('font', QFont()) # Use stored font, or default
-            painter.setFont(font)
-            painter.setPen(QPen(item['color']))
-            painter.drawText(item['rect'], Qt.TextFlag.TextWordWrap, item['text'])
+            glow_fx = item.get('glow_fx')
+            if glow_fx and glow_fx['enabled']:
+                self.draw_text_with_glow(painter, item)
+            else:
+                self.draw_standard_text(painter, item)
+
+    def draw_standard_text(self, painter, item):
+        font = item.get('font', QFont())
+        painter.setFont(font)
+        painter.setPen(QPen(item['color']))
+        painter.drawText(item['rect'], Qt.TextFlag.TextWordWrap, item['text'])
+
+    def draw_text_with_glow(self, painter, item):
+        glow_fx = item['glow_fx']
+        font = item.get('font', QFont())
+
+        # Determine the size needed for the offscreen pixmap
+        glow_size = glow_fx['size']
+        padding = glow_size * 2
+        original_rect = item['rect']
+        pixmap_rect = original_rect.adjusted(-padding, -padding, padding, padding)
+
+        # Create offscreen buffer
+        buffer = QPixmap(pixmap_rect.size())
+        buffer.fill(Qt.GlobalColor.transparent)
+
+        # Draw the text onto the buffer
+        buffer_painter = QPainter(buffer)
+        buffer_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        buffer_painter.setFont(font)
+        buffer_painter.setPen(QPen(glow_fx['color']))
+        # Adjust text position for the padding
+        buffer_painter.drawText(QRect(padding, padding, original_rect.width(), original_rect.height()), Qt.TextFlag.TextWordWrap, item['text'])
+        buffer_painter.end()
+
+        # Apply blur effect
+        scene = QGraphicsScene()
+        pixmap_item = scene.addPixmap(buffer)
+        blur_effect = QGraphicsBlurEffect()
+        blur_effect.setBlurRadius(glow_size)
+        pixmap_item.setGraphicsEffect(blur_effect)
+
+        # Render the blurred scene back to a pixmap
+        glow_pixmap = QPixmap(pixmap_rect.size())
+        glow_pixmap.fill(Qt.GlobalColor.transparent)
+        renderer = QPainter(glow_pixmap)
+        scene.render(renderer)
+        renderer.end()
+
+        # Draw the glow pixmap to the main canvas
+        painter.setOpacity(glow_fx['opacity'])
+        painter.drawPixmap(pixmap_rect.topLeft(), glow_pixmap)
+        painter.setOpacity(1.0) # Reset opacity
+
+        # Draw the original text on top
+        self.draw_standard_text(painter, item)
 
     def mouseDoubleClickEvent(self, event):
         item_at_pos = self.find_item_for_selection(event.pos())
@@ -858,9 +1075,13 @@ class MainWindow(QMainWindow):
         self.canvas = Canvas(self, self.character_manager, self.layer_manager, self.page_manager, self.text_tools)
         self.setCentralWidget(self.canvas)
 
+        self.character_manager.set_canvas(self.canvas) # Set canvas reference
         self.layer_manager.set_canvas(self.canvas)
         self.page_manager.set_canvas(self.canvas)
         self.text_tools.set_canvas(self.canvas)
+
+        # Connect canvas selection signal to character manager
+        self.canvas.selectionChanged.connect(self.character_manager.update_dialogue_editor)
 
         self.toolbar = QToolBar("Main Toolbar")
         self.addToolBar(self.toolbar)
@@ -943,6 +1164,10 @@ class MainWindow(QMainWindow):
                             'italic': font.italic()
                         }
                         del item_copy['font']
+                    if 'glow_fx' in item_copy:
+                        glow_color = item_copy['glow_fx']['color']
+                        item_copy['glow_fx']['color_hex'] = glow_color.name()
+                        del item_copy['glow_fx']['color']
                 page_data['items'][item_id] = item_copy
             project_data['pages'].append(page_data)
         return project_data
@@ -972,6 +1197,9 @@ class MainWindow(QMainWindow):
                         font.setItalic(font_data['italic'])
                         item_copy['font'] = font
                         del item_copy['font_data']
+                    if 'glow_fx' in item_copy:
+                        item_copy['glow_fx']['color'] = QColor(item_copy['glow_fx']['color_hex'])
+                        del item_copy['glow_fx']['color_hex']
                 new_page['items'][item_id] = item_copy
             self.canvas.pages.append(new_page)
         self.canvas.set_current_page(0)
