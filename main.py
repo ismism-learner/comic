@@ -10,18 +10,100 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QToolBar, QMenuBar,
     QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QListWidget, QListWidgetItem,
     QColorDialog, QDockWidget, QInputDialog, QMessageBox, QFileDialog,
-    QAbstractItemView, QLabel, QFrame
+    QAbstractItemView, QLabel, QFrame, QFontComboBox, QSpinBox
 )
 from PyQt6.QtGui import (
     QAction, QPainter, QPen, QBrush, QCursor,
-    QPixmap, QColor, QFontMetrics, QIcon, QDrag, QPainterPath
+    QPixmap, QColor, QFontMetrics, QIcon, QDrag, QPainterPath, QFont
 )
 from PyQt6.QtCore import (
     Qt, QPoint, QRect, QUrl, QBuffer,
     QByteArray, QIODevice, QThread, pyqtSignal, QMimeData, QRectF
 )
 
-# ... CharacterManager, RembgThread, BackgroundRemover, PageManager, LayerManager classes are now complete and formatted ...
+class TextToolsWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.canvas = None
+        self.layout = QVBoxLayout(self)
+
+        self.add_text_button = QPushButton("Add New Text")
+        self.layout.addWidget(self.add_text_button)
+
+        self.font_combo = QFontComboBox()
+        self.font_size_spinbox = QSpinBox()
+        self.font_size_spinbox.setRange(1, 200)
+        self.bold_button = QPushButton("Bold")
+        self.bold_button.setCheckable(True)
+        self.italic_button = QPushButton("Italic")
+        self.italic_button.setCheckable(True)
+
+        style_layout = QHBoxLayout()
+        style_layout.addWidget(self.bold_button)
+        style_layout.addWidget(self.italic_button)
+
+        self.layout.addWidget(QLabel("Font:"))
+        self.layout.addWidget(self.font_combo)
+        self.layout.addWidget(QLabel("Size:"))
+        self.layout.addWidget(self.font_size_spinbox)
+        self.layout.addLayout(style_layout)
+
+        self.layout.addStretch()
+        self.disable_controls()
+
+    def set_canvas(self, canvas):
+        self.canvas = canvas
+        self.add_text_button.clicked.connect(lambda: self.canvas.add_text_item(self.canvas.rect().center()))
+        self.font_combo.currentFontChanged.connect(self.on_font_property_changed)
+        self.font_size_spinbox.valueChanged.connect(self.on_font_property_changed)
+        self.bold_button.clicked.connect(self.on_font_property_changed)
+        self.italic_button.clicked.connect(self.on_font_property_changed)
+
+    def on_font_property_changed(self):
+        if not self.canvas or not self.canvas.selected_item_id:
+            return
+        selected_item = self.canvas.get_item_by_id(self.canvas.selected_item_id)
+        if not selected_item or selected_item['type'] != 'text':
+            return
+
+        font = QFont(self.font_combo.currentFont())
+        font.setPointSize(self.font_size_spinbox.value())
+        font.setBold(self.bold_button.isChecked())
+        font.setItalic(self.italic_button.isChecked())
+
+        self.canvas.update_selected_text_item_font(font)
+
+    def update_controls(self, item):
+        if item and item['type'] == 'text':
+            self.enable_controls()
+            font = item.get('font', QFont()) # Use default QFont if not set
+
+            # Block signals to prevent feedback loops
+            self.font_combo.blockSignals(True)
+            self.font_size_spinbox.blockSignals(True)
+            self.bold_button.blockSignals(True)
+            self.italic_button.blockSignals(True)
+
+            self.font_combo.setCurrentFont(font)
+            self.font_size_spinbox.setValue(font.pointSize() if font.pointSize() > 0 else 12)
+            self.bold_button.setChecked(font.bold())
+            self.italic_button.setChecked(font.italic())
+
+            self.font_combo.blockSignals(False)
+            self.font_size_spinbox.blockSignals(False)
+            self.bold_button.blockSignals(False)
+            self.italic_button.blockSignals(False)
+        else:
+            self.disable_controls()
+
+    def enable_controls(self):
+        for w in [self.font_combo, self.font_size_spinbox, self.bold_button, self.italic_button]:
+            w.setEnabled(True)
+
+    def disable_controls(self):
+        for w in [self.font_combo, self.font_size_spinbox, self.bold_button, self.italic_button]:
+            w.setEnabled(False)
+
 class CharacterManager(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -173,11 +255,12 @@ class LayerManager(QWidget):
 
 class Canvas(QWidget):
     MIME_TYPE = "application/x-comic-creator-image"
-    def __init__(self, parent=None, character_manager=None, layer_manager=None, page_manager=None):
+    def __init__(self, parent=None, character_manager=None, layer_manager=None, page_manager=None, text_tools=None):
         super().__init__(parent)
         self.character_manager = character_manager
         self.layer_manager = layer_manager
         self.page_manager = page_manager
+        self.text_tools = text_tools
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -190,7 +273,9 @@ class Canvas(QWidget):
         self.resize_handle = None
         self.move_offset = QPoint()
         self.edit_mode_parent_id = None
-        self.double_click_flag = False # Flag to detect drag after double click
+        self.double_click_flag = False
+        self.text_editor = None # Add a member for the floating text editor
+
     def get_current_page(self): return self.pages[self.current_page_index]
     def get_current_page_items(self): return self.get_current_page()['items']
     def get_item_by_id(self, item_id): return self.get_current_page_items().get(item_id)
@@ -208,8 +293,21 @@ class Canvas(QWidget):
 
     def set_selected_item_id(self, item_id):
         self.selected_item_id = item_id
+        selected_item = self.get_item_by_id(item_id)
+        if self.text_tools:
+            self.text_tools.update_controls(selected_item)
         self._update_layer_view()
-        self.update() # Repaint canvas to show new selection handles
+        self.update()
+
+    def update_selected_text_item_font(self, font):
+        if not self.selected_item_id: return
+        item = self.get_item_by_id(self.selected_item_id)
+        if not item or item['type'] != 'text': return
+        item['font'] = font
+        # Recalculate bounding rect based on new font
+        metrics = QFontMetrics(font)
+        item['rect'] = metrics.boundingRect(item['rect'], Qt.TextFlag.TextWordWrap, item['text'])
+        self.update()
 
     def _update_layer_view(self): self.layer_manager.update_layers(self.get_current_page_items(), self.selected_item_id)
     def find_item_for_selection(self, pos):
@@ -290,14 +388,67 @@ class Canvas(QWidget):
         self.set_selected_item_id(item_id)
 
     def add_text_item(self, pos):
-        text, ok = QInputDialog.getText(self, 'Add Text', 'Enter your text:')
-        if ok and text:
-            rect = QFontMetrics(self.font()).boundingRect(text).translated(pos)
-            item_id, new_text_item = self._create_item('text', rect, {'text': text, 'color': self.character_manager.get_current_character_color()})
-            if self.edit_mode_parent_id:
-                parent = self.get_item_by_id(self.edit_mode_parent_id)
-                if parent: new_text_item['parent'] = parent['id']; parent['children'].append(item_id)
-            self.set_selected_item_id(item_id)
+        text = "New Text"
+        font = QFont()
+        rect = QFontMetrics(font).boundingRect(text).translated(pos)
+        item_data = {
+            'text': text,
+            'color': self.character_manager.get_current_character_color(),
+            'font': font
+        }
+        item_id, new_text_item = self._create_item('text', rect, item_data)
+
+        if self.edit_mode_parent_id:
+            parent = self.get_item_by_id(self.edit_mode_parent_id)
+            if parent:
+                new_text_item['parent'] = parent['id']
+                parent['children'].append(item_id)
+
+        self.set_selected_item_id(item_id)
+        self.edit_text_item(new_text_item) # Immediately enter edit mode
+
+    def edit_text_item(self, item):
+        if self.text_editor:
+            self.text_editor.deleteLater()
+
+        self.text_editor = QLineEdit(self)
+        self.text_editor.setGeometry(item['rect'])
+        self.text_editor.setText(item['text'])
+        self.text_editor.setFont(item.get('font', QFont()))
+
+        self.text_editor.setStyleSheet("background-color: rgba(255, 255, 255, 0.8); border: 1px solid #aaa;")
+
+        self.text_editor.returnPressed.connect(self.finish_text_edit)
+        self.text_editor.editingFinished.connect(self.finish_text_edit) # Handles focus loss
+
+        self.text_editor.show()
+        self.text_editor.setFocus()
+
+    def finish_text_edit(self):
+        if not self.text_editor or not self.selected_item_id:
+            return
+
+        item = self.get_item_by_id(self.selected_item_id)
+        if not item or item['type'] != 'text':
+            self.text_editor.deleteLater()
+            self.text_editor = None
+            return
+
+        new_text = self.text_editor.text()
+        item['text'] = new_text
+
+        # Recalculate bounding rect based on new text and existing font
+        font = item.get('font', QFont())
+        metrics = QFontMetrics(font)
+        # Use a reasonable width for boundingRect calculation if the original rect was tiny
+        current_rect = item['rect']
+        new_rect = metrics.boundingRect(QRect(current_rect.topLeft(), current_rect.size()), Qt.TextFlag.TextWordWrap, new_text)
+        item['rect'] = new_rect
+
+        self.text_editor.deleteLater()
+        self.text_editor = None
+        self._update_layer_view()
+        self.update()
 
     def delete_selected_item(self):
         if not self.selected_item_id: return
@@ -339,19 +490,30 @@ class Canvas(QWidget):
                 if child_item: self._draw_item_recursive(painter, child_item, all_items)
             painter.restore()
         elif item['type'] == 'image': painter.drawPixmap(item['rect'], item['pixmap'])
-        elif item['type'] == 'text': painter.setPen(QPen(item['color'])); painter.drawText(item['rect'], Qt.TextFlag.TextWordWrap, item['text'])
+        elif item['type'] == 'text':
+            font = item.get('font', QFont()) # Use stored font, or default
+            painter.setFont(font)
+            painter.setPen(QPen(item['color']))
+            painter.drawText(item['rect'], Qt.TextFlag.TextWordWrap, item['text'])
+
     def mouseDoubleClickEvent(self, event):
-        item = self.find_top_level_item(event.pos(), item_type='panel')
-        if item:
-            if self.edit_mode_parent_id == item['id']:
+        item_at_pos = self.find_item_for_selection(event.pos())
+
+        if item_at_pos and item_at_pos['type'] == 'text':
+            self.edit_text_item(item_at_pos)
+            return
+
+        panel_at_pos = self.find_top_level_item(event.pos(), item_type='panel')
+        if panel_at_pos:
+            if self.edit_mode_parent_id == panel_at_pos['id']:
                 self.edit_mode_parent_id = None
-                self.set_selected_item_id(item['id'])
+                self.set_selected_item_id(panel_at_pos['id'])
             else:
-                self.edit_mode_parent_id = item['id']
+                self.edit_mode_parent_id = panel_at_pos['id']
                 self.set_selected_item_id(None)
         else:
             self.edit_mode_parent_id = None
-            self.double_click_flag = True # Set flag to enable drawing on drag
+            self.double_click_flag = True
             self.start_point = event.pos()
         self.update()
 
@@ -453,22 +615,61 @@ class Canvas(QWidget):
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("Comic Creator v2.3"); self.setGeometry(100, 100, 1400, 900)
-        self.character_manager = CharacterManager(self); self.layer_manager = LayerManager(self); self.bg_remover = BackgroundRemover(self); self.page_manager = PageManager(self)
-        self.canvas = Canvas(self, self.character_manager, self.layer_manager, self.page_manager)
+        super().__init__()
+        self.setWindowTitle("Comic Creator v2.6")
+        self.setGeometry(100, 100, 1400, 900)
+
+        self.character_manager = CharacterManager(self)
+        self.layer_manager = LayerManager(self)
+        self.bg_remover = BackgroundRemover(self)
+        self.page_manager = PageManager(self)
+        self.text_tools = TextToolsWidget(self)
+
+        self.canvas = Canvas(self, self.character_manager, self.layer_manager, self.page_manager, self.text_tools)
         self.setCentralWidget(self.canvas)
-        self.layer_manager.set_canvas(self.canvas); self.page_manager.set_canvas(self.canvas)
-        self.toolbar = QToolBar("Main Toolbar"); self.addToolBar(self.toolbar); self._create_toolbar(); self.menu_bar = self.menuBar(); self._create_menu_bar(); self._create_docks()
+
+        self.layer_manager.set_canvas(self.canvas)
+        self.page_manager.set_canvas(self.canvas)
+        self.text_tools.set_canvas(self.canvas)
+
+        self.toolbar = QToolBar("Main Toolbar")
+        self.addToolBar(self.toolbar)
+        self._create_toolbar()
+
+        self.menu_bar = self.menuBar()
+        self._create_menu_bar()
+        self._create_docks()
         self.page_manager.update_page_list()
+
     def _create_docks(self):
-        self.page_dock = QDockWidget("Pages", self); self.page_dock.setWidget(self.page_manager); self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.page_dock)
-        self.bg_remover_dock = QDockWidget("Background Remover", self); self.bg_remover_dock.setWidget(self.bg_remover); self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.bg_remover_dock)
-        self.character_dock = QDockWidget("Characters", self); self.character_dock.setWidget(self.character_manager); self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.character_dock)
-        self.layer_dock = QDockWidget("Layers", self); self.layer_dock.setWidget(self.layer_manager); self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.layer_dock)
+        self.page_dock = QDockWidget("Pages", self)
+        self.page_dock.setWidget(self.page_manager)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.page_dock)
+
+        self.text_dock = QDockWidget("Text Tools", self) # New dock for text tools
+        self.text_dock.setWidget(self.text_tools)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.text_dock)
+
+        self.bg_remover_dock = QDockWidget("Background Remover", self)
+        self.bg_remover_dock.setWidget(self.bg_remover)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.bg_remover_dock)
+
+        self.character_dock = QDockWidget("Characters", self)
+        self.character_dock.setWidget(self.character_manager)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.character_dock)
+
+        self.layer_dock = QDockWidget("Layers", self)
+        self.layer_dock.setWidget(self.layer_manager)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.layer_dock)
+
     def _create_toolbar(self):
-        add_panel_action = QAction("Add Panel (Container)", self); self.toolbar.addAction(add_panel_action)
-        add_text_action = QAction("Add Text", self); add_text_action.triggered.connect(lambda: self.canvas.add_text_item(self.canvas.rect().center())); self.toolbar.addAction(add_text_action)
-        self.toolbar.addSeparator(); delete_action = QAction("Delete", self); delete_action.triggered.connect(self.canvas.delete_selected_item); self.toolbar.addAction(delete_action)
+        add_panel_action = QAction("Add Panel (Container)", self)
+        self.toolbar.addAction(add_panel_action)
+        # Add Text action is now in the TextToolsWidget
+        self.toolbar.addSeparator()
+        delete_action = QAction("Delete", self)
+        delete_action.triggered.connect(self.canvas.delete_selected_item)
+        self.toolbar.addAction(delete_action)
     def _create_menu_bar(self):
         file_menu = self.menu_bar.addMenu("&File"); actions = {"New": self.new_project, "Open...": self.open_project, "Save As...": self.save_project, "Export As...": self.export_comic, "Exit": self.close}; file_menu.addAction(QAction("New", self, triggered=actions["New"])); file_menu.addAction(QAction("Open...", self, triggered=actions["Open..."])); file_menu.addAction(QAction("Save As...", self, triggered=actions["Save As..."])); file_menu.addSeparator(); file_menu.addAction(QAction("Export As...", self, triggered=actions["Export As..."])); file_menu.addSeparator(); file_menu.addAction(QAction("Exit", self, triggered=actions["Exit"]))
     def new_project(self): self.canvas.clear_canvas(); self.character_manager.clear_characters()
@@ -486,7 +687,17 @@ class MainWindow(QMainWindow):
                     item_copy['pixmap_base64'] = base64.b64encode(buffer.data().data()).decode('utf-8')
                     del item_copy['pixmap']
                 elif item_copy['type'] == 'text':
-                    color = item_copy['color']; item_copy['color'] = (color.red(), color.green(), color.blue(), color.alpha())
+                    color = item_copy['color']
+                    item_copy['color'] = (color.red(), color.green(), color.blue(), color.alpha())
+                    if 'font' in item_copy:
+                        font = item_copy['font']
+                        item_copy['font_data'] = {
+                            'family': font.family(),
+                            'pointSize': font.pointSize(),
+                            'bold': font.bold(),
+                            'italic': font.italic()
+                        }
+                        del item_copy['font']
                 page_data['items'][item_id] = item_copy
             project_data['pages'].append(page_data)
         return project_data
@@ -500,11 +711,20 @@ class MainWindow(QMainWindow):
                 item_copy = item_data.copy()
                 item_copy['rect'] = QRect(*item_copy['rect'])
                 if item_copy['type'] == 'image':
-                    pixmap = QPixmap(); pixmap.loadFromData(QByteArray(base64.b64decode(item_copy['pixmap_base64'])))
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(QByteArray(base64.b64decode(item_copy['pixmap_base64'])))
                     item_copy['pixmap'] = pixmap
                     del item_copy['pixmap_base64']
                 elif item_copy['type'] == 'text':
                     item_copy['color'] = QColor(*item_copy['color'])
+                    if 'font_data' in item_copy:
+                        font_data = item_copy['font_data']
+                        font = QFont(font_data['family'])
+                        font.setPointSize(font_data['pointSize'])
+                        font.setBold(font_data['bold'])
+                        font.setItalic(font_data['italic'])
+                        item_copy['font'] = font
+                        del item_copy['font_data']
                 new_page['items'][item_id] = item_copy
             self.canvas.pages.append(new_page)
         self.canvas.set_current_page(0)
