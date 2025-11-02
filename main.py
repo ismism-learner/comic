@@ -3,6 +3,7 @@ import json
 import base64
 import io
 import os
+import uuid # For unique item IDs
 from rembg import remove
 
 from PyQt6.QtWidgets import (
@@ -20,10 +21,14 @@ from PyQt6.QtCore import (
     QByteArray, QIODevice, QThread, pyqtSignal, QMimeData, QRectF
 )
 
-# ... All other classes are unchanged ...
+# ... CharacterManager, RembgThread, BackgroundRemover, PageManager, LayerManager classes are now complete and formatted ...
 class CharacterManager(QWidget):
     def __init__(self, parent=None):
-        super().__init__(parent); self.characters = {}; self.current_character = None; self.selected_color = QColor(Qt.GlobalColor.black); self._setup_ui()
+        super().__init__(parent)
+        self.characters = {}
+        self.current_character = None
+        self.selected_color = QColor(Qt.GlobalColor.black)
+        self._setup_ui()
     def _setup_ui(self):
         self.layout = QVBoxLayout(self); self.char_list = QListWidget(); self.char_list.itemClicked.connect(self.select_character); self.name_input = QLineEdit(); self.name_input.setPlaceholderText("Character Name"); self.color_button = QPushButton("Choose Color"); self.color_button.clicked.connect(self.choose_color); self.add_button = QPushButton("Add Character"); self.add_button.clicked.connect(self.add_character); self.layout.addWidget(self.char_list); self.layout.addWidget(self.name_input); self.layout.addWidget(self.color_button); self.layout.addWidget(self.add_button)
     def choose_color(self):
@@ -65,267 +70,395 @@ class BackgroundRemover(QWidget):
         drag = QDrag(self); mime_data = QMimeData(); byte_array = QByteArray(); buffer = QBuffer(byte_array); buffer.open(QIODevice.OpenModeFlag.WriteOnly); self.processed_pixmap.save(buffer, "PNG"); mime_data.setData("application/x-comic-creator-image", byte_array); drag.setMimeData(mime_data); drag.setPixmap(self.processed_pixmap.scaledToWidth(64)); drag.exec(Qt.DropAction.CopyAction)
 class PageManager(QWidget):
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.canvas = None  # To be set later by MainWindow
-        self.layout = QVBoxLayout(self)
-        self.page_list = QListWidget()
-
-        button_layout = QHBoxLayout()
-        self.add_page_button = QPushButton("New Page")
-        self.delete_page_button = QPushButton("Delete Page")
-        button_layout.addWidget(self.add_page_button)
-        button_layout.addWidget(self.delete_page_button)
-
-        self.layout.addWidget(self.page_list)
-        self.layout.addLayout(button_layout)
-
-    def set_canvas(self, canvas):
-        """Establish connections after canvas is created."""
-        self.canvas = canvas
-        self.page_list.currentRowChanged.connect(self.canvas.set_current_page)
-        self.add_page_button.clicked.connect(self.canvas.add_page)
-        self.delete_page_button.clicked.connect(self.canvas.delete_current_page)
-
+        super().__init__(parent); self.canvas = None; self.layout = QVBoxLayout(self); self.page_list = QListWidget(); button_layout = QHBoxLayout(); self.add_page_button = QPushButton("New Page"); self.delete_page_button = QPushButton("Delete Page"); button_layout.addWidget(self.add_page_button); button_layout.addWidget(self.delete_page_button); self.layout.addWidget(self.page_list); self.layout.addLayout(button_layout)
+    def set_canvas(self, canvas): self.canvas = canvas; self.page_list.currentRowChanged.connect(self.canvas.set_current_page); self.add_page_button.clicked.connect(self.canvas.add_page); self.delete_page_button.clicked.connect(self.canvas.delete_current_page)
     def update_page_list(self):
         if not self.canvas: return
-        self.page_list.blockSignals(True)
-        self.page_list.clear()
-        for i in range(len(self.canvas.pages)):
-            self.page_list.addItem(f"Page {i + 1}")
-        self.page_list.setCurrentRow(self.canvas.current_page_index)
-        self.page_list.blockSignals(False)
+        self.page_list.blockSignals(True); self.page_list.clear()
+        for i in range(len(self.canvas.pages)): self.page_list.addItem(f"Page {i + 1}")
+        self.page_list.setCurrentRow(self.canvas.current_page_index); self.page_list.blockSignals(False)
+class LayerListWidget(QListWidget):
+    def __init__(self, layer_manager, parent=None):
+        super().__init__(parent)
+        self.layer_manager = layer_manager
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def dropEvent(self, event):
+        target_item = self.itemAt(event.position().toPoint())
+        selected_items = self.selectedItems()
+        if not selected_items:
+            event.ignore(); return
+
+        dragged_item_data = selected_items[0].data(Qt.ItemDataRole.UserRole)
+        if not dragged_item_data:
+            event.ignore(); return
+
+        new_parent_id = None
+        if target_item:
+            target_item_data = target_item.data(Qt.ItemDataRole.UserRole)
+            if target_item_data: new_parent_id = target_item_data['id']
+
+        if self.layer_manager.canvas.reparent_item(dragged_item_data['id'], new_parent_id):
+            event.accept()
+        else:
+            self.layer_manager.canvas._update_layer_view()
+            event.ignore()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
+            if self.layer_manager.canvas: self.layer_manager.canvas.delete_selected_item()
+        else:
+            super().keyPressEvent(event)
+
 class LayerManager(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.canvas = None # To be set later
+        self.canvas = None
         self.layout = QVBoxLayout(self)
-        self.layer_list = QListWidget()
-        self.layer_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.layer_list.model().rowsMoved.connect(self.on_layer_moved)
+        self.layer_list = LayerListWidget(self, self)
+        self.layer_list.itemClicked.connect(self.on_item_clicked)
         self.layout.addWidget(self.layer_list)
 
     def set_canvas(self, canvas):
         self.canvas = canvas
 
-    def on_layer_moved(self):
-        if not self.canvas: return
-        new_items_order = [self.layer_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.layer_list.count() - 1, -1, -1)]
-        for item in self.canvas.get_current_page_items():
-            if item['type'] == 'panel': new_items_order.append(item)
-        self.canvas.get_current_page()['items'] = new_items_order
-        self.canvas.update()
-    def update_layers(self, page_items):
+    def get_z_ordered_ids(self):
+        return [self.layer_list.item(i).data(Qt.ItemDataRole.UserRole)['id'] for i in range(self.layer_list.count()) if self.layer_list.item(i)]
+
+    def on_item_clicked(self, list_item):
+        if self.canvas and list_item:
+            item_data = list_item.data(Qt.ItemDataRole.UserRole)
+            if item_data: self.canvas.set_selected_item_id(item_data['id'])
+
+    def update_layers(self, items_dict, selected_item_id=None):
+        self.layer_list.blockSignals(True)
         self.layer_list.clear()
-        content_items = [item for item in page_items if item['type'] in ('image', 'text')]
-        for item_obj in reversed(content_items):
-            if item_obj['type'] == 'image': list_item = QListWidgetItem("Image Layer"); list_item.setIcon(QIcon(item_obj['pixmap'].scaledToWidth(64)))
-            elif item_obj['type'] == 'text': list_item = QListWidgetItem(f"Text: '{item_obj['text'][:10]}...'")
-            list_item.setData(Qt.ItemDataRole.UserRole, item_obj); self.layer_list.addItem(list_item)
+        item_tree = {}
+        top_level_items = []
+
+        for item_id, item in items_dict.items():
+            item_tree[item_id] = {'item': item, 'children': []}
+        for item_id, node in item_tree.items():
+            parent_id = node['item'].get('parent')
+            if parent_id in item_tree:
+                item_tree[parent_id]['children'].append(node)
+            else:
+                top_level_items.append(node)
+
+        def populate_widget(nodes, indent=0):
+            for node in reversed(nodes):
+                item_data = node['item']
+                prefix = "    " * indent
+                if item_data['type'] == 'panel':
+                    list_item = QListWidgetItem(f"{prefix}🖼️ Panel/Container")
+                elif item_data['type'] == 'image':
+                    list_item = QListWidgetItem(f"{prefix}📷 Image Layer")
+                elif item_data['type'] == 'text':
+                    list_item = QListWidgetItem(f"{prefix}✍️ Text: '{item_data['text'][:10]}...'")
+                list_item.setData(Qt.ItemDataRole.UserRole, item_data)
+                self.layer_list.addItem(list_item)
+                populate_widget(node['children'], indent + 1)
+        populate_widget(top_level_items)
+
+        # After populating, find and select the item
+        for i in range(self.layer_list.count()):
+            list_item = self.layer_list.item(i)
+            item_data = list_item.data(Qt.ItemDataRole.UserRole)
+            if item_data and item_data['id'] == selected_item_id:
+                self.layer_list.setCurrentItem(list_item)
+                break
+        self.layer_list.blockSignals(False)
 
 class Canvas(QWidget):
-    # ... Canvas is mostly unchanged, save/load is handled by MainWindow ...
     MIME_TYPE = "application/x-comic-creator-image"
     def __init__(self, parent=None, character_manager=None, layer_manager=None, page_manager=None):
-        super().__init__(parent); self.character_manager = character_manager; self.layer_manager = layer_manager; self.page_manager = page_manager; self.setMouseTracking(True); self.setAcceptDrops(True); self.setFocusPolicy(Qt.FocusPolicy.StrongFocus); self.pages = [{'items': []}]; self.current_page_index = 0; self.current_rect_for_drawing = None; self.start_point = None; self.selected_item_index = -1; self.interaction_mode = "none"; self.resize_handle = None; self.move_offset = QPoint()
+        super().__init__(parent)
+        self.character_manager = character_manager
+        self.layer_manager = layer_manager
+        self.page_manager = page_manager
+        self.setMouseTracking(True)
+        self.setAcceptDrops(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.pages = [{'items': {}}]
+        self.current_page_index = 0
+        self.current_rect_for_drawing = None
+        self.start_point = None
+        self.selected_item_id = None
+        self.interaction_mode = "none"
+        self.resize_handle = None
+        self.move_offset = QPoint()
+        self.edit_mode_parent_id = None
+        self.double_click_flag = False # Flag to detect drag after double click
     def get_current_page(self): return self.pages[self.current_page_index]
     def get_current_page_items(self): return self.get_current_page()['items']
-    def add_page(self): self.pages.append({'items': []}); self.set_current_page(len(self.pages) - 1)
+    def get_item_by_id(self, item_id): return self.get_current_page_items().get(item_id)
+    def _create_item(self, item_type, rect, data=None):
+        item_id = str(uuid.uuid4()); item = {'id': item_id, 'type': item_type, 'rect': rect, 'parent': None};
+        if item_type == 'panel': item['children'] = []
+        if data: item.update(data)
+        self.get_current_page_items()[item_id] = item
+        return item_id, item
+    def add_page(self): self.pages.append({'items': {}}); self.set_current_page(len(self.pages) - 1)
     def delete_current_page(self):
         if len(self.pages) > 1: self.pages.pop(self.current_page_index); self.set_current_page(max(0, self.current_page_index - 1))
-    def set_current_page(self, index): self.current_page_index = index; self.selected_item_index = -1; self._update_layer_view(); self.page_manager.update_page_list(); self.update()
-    def _update_layer_view(self): self.layer_manager.update_layers(self.get_current_page_items())
-    def find_item(self, point):
-        for i in range(len(self.get_current_page_items()) - 1, -1, -1):
-            if self.get_current_page_items()[i]['rect'].contains(point): return i
-        return -1
+    def set_current_page(self, index):
+        if 0 <= index < len(self.pages): self.current_page_index = index; self.set_selected_item_id(None); self.edit_mode_parent_id = None; self.page_manager.update_page_list(); self.update()
+
+    def set_selected_item_id(self, item_id):
+        self.selected_item_id = item_id
+        self._update_layer_view()
+        self.update() # Repaint canvas to show new selection handles
+
+    def _update_layer_view(self): self.layer_manager.update_layers(self.get_current_page_items(), self.selected_item_id)
+    def find_item_for_selection(self, pos):
+        if self.edit_mode_parent_id:
+            parent = self.get_item_by_id(self.edit_mode_parent_id)
+            if parent:
+                for child_id in reversed(parent['children']):
+                    child = self.get_item_by_id(child_id)
+                    if child and child['rect'].contains(pos): return child
+            return parent
+        return self.find_top_level_item(pos)
+    def find_top_level_item(self, pos, item_type=None):
+        all_items = self.get_current_page_items()
+        # Create a z-ordered list based on the layer manager's list
+        z_ordered_ids = self.layer_manager.get_z_ordered_ids()
+        for item_id in reversed(z_ordered_ids):
+            item = all_items.get(item_id)
+            if item and item.get('parent') is None and (item_type is None or item['type'] == item_type) and item['rect'].contains(pos):
+                return item
+        return None
+
+    def reparent_item(self, item_id, new_parent_id):
+        item = self.get_item_by_id(item_id)
+        if not item: return False
+
+        # --- Validation ---
+        # 1. An item cannot be its own parent.
+        if item_id == new_parent_id: return False
+
+        # 2. If the new parent is not a panel, we can't drop onto it.
+        #    (But we can drop "between" items, making it top-level, so new_parent_id can be None)
+        if new_parent_id:
+            new_parent = self.get_item_by_id(new_parent_id)
+            if not new_parent or new_parent['type'] != 'panel':
+                # If the target is not a panel, make the item top-level instead
+                new_parent_id = None
+
+        # 3. Prevent cyclical parenting (e.g., parenting a panel to one of its own children)
+        temp_parent_id = new_parent_id
+        while temp_parent_id:
+            if temp_parent_id == item_id:
+                return False # Found a cycle
+            temp_parent = self.get_item_by_id(temp_parent_id)
+            temp_parent_id = temp_parent.get('parent') if temp_parent else None
+
+        # --- Reparenting Logic ---
+        # 1. Remove from old parent's children list
+        old_parent_id = item.get('parent')
+        if old_parent_id:
+            old_parent = self.get_item_by_id(old_parent_id)
+            if old_parent and item_id in old_parent['children']:
+                old_parent['children'].remove(item_id)
+
+        # 2. Set new parent
+        item['parent'] = new_parent_id
+
+        # 3. Add to new parent's children list
+        if new_parent_id:
+            new_parent = self.get_item_by_id(new_parent_id)
+            if new_parent: # Should always exist after our check
+                if 'children' not in new_parent: new_parent['children'] = []
+                new_parent['children'].append(item_id)
+
+        self._update_layer_view()
+        self.update()
+        return True
     def dropEvent(self, event):
         pixmap = None
         if event.mimeData().hasFormat(self.MIME_TYPE): pixmap = QPixmap(); pixmap.loadFromData(event.mimeData().data(self.MIME_TYPE))
         elif event.mimeData().hasUrls(): pixmap = QPixmap(event.mimeData().urls()[0].toLocalFile())
-        if pixmap and not pixmap.isNull(): new_rect = QRect(event.position().toPoint(), pixmap.size()); new_image_item = {'type': 'image', 'rect': new_rect, 'pixmap': pixmap}; self.get_current_page_items().append(new_image_item); self.selected_item_index = len(self.get_current_page_items()) - 1; self.update(); self._update_layer_view()
+        if not (pixmap and not pixmap.isNull()): return
+
+        new_rect = QRect(event.position().toPoint(), pixmap.size())
+        item_id, new_image_item = self._create_item('image', new_rect, {'pixmap': pixmap})
+
+        parent_panel = self.find_top_level_item(event.position().toPoint(), item_type='panel')
+        if parent_panel: new_image_item['parent'] = parent_panel['id']; parent_panel['children'].append(item_id)
+        self.set_selected_item_id(item_id)
+
     def add_text_item(self, pos):
         text, ok = QInputDialog.getText(self, 'Add Text', 'Enter your text:')
-        if ok and text: new_text_item = {'type': 'text', 'rect': QFontMetrics(self.font()).boundingRect(text).translated(pos), 'text': text, 'color': self.character_manager.get_current_character_color()}; self.get_current_page_items().append(new_text_item); self.selected_item_index = len(self.get_current_page_items()) - 1; self.update(); self._update_layer_view()
+        if ok and text:
+            rect = QFontMetrics(self.font()).boundingRect(text).translated(pos)
+            item_id, new_text_item = self._create_item('text', rect, {'text': text, 'color': self.character_manager.get_current_character_color()})
+            if self.edit_mode_parent_id:
+                parent = self.get_item_by_id(self.edit_mode_parent_id)
+                if parent: new_text_item['parent'] = parent['id']; parent['children'].append(item_id)
+            self.set_selected_item_id(item_id)
+
     def delete_selected_item(self):
-        if self.selected_item_index != -1: del self.get_current_page_items()[self.selected_item_index]; self.selected_item_index = -1; self.update(); self._update_layer_view()
+        if not self.selected_item_id: return
+        items_to_delete = {self.selected_item_id}
+        item = self.get_item_by_id(self.selected_item_id)
+        if item and item['type'] == 'panel':
+            for child_id in item['children']: items_to_delete.add(child_id)
+
+        if item and item.get('parent'):
+            parent = self.get_item_by_id(item['parent'])
+            if parent and self.selected_item_id in parent['children']:
+                parent['children'].remove(self.selected_item_id)
+
+        for item_id in items_to_delete:
+            self.get_current_page_items().pop(item_id, None)
+
+        self.set_selected_item_id(None)
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        items = self.get_current_page_items()
-        content_items = [item for item in items if item['type'] in ('image', 'text')]
-        mask_items = [item for item in items if item['type'] == 'panel']
-
-        # 1. Draw a white background for the entire page
+        painter = QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), Qt.GlobalColor.white)
+        items_dict = self.get_current_page_items()
 
-        # 2. Draw all content items
-        for item in content_items:
-            if item['type'] == 'image':
-                self._draw_image(painter, item)
-            elif item['type'] == 'text':
-                self._draw_text(painter, item)
+        for item in items_dict.values():
+            if item.get('parent') is None: self._draw_item_recursive(painter, item, items_dict)
 
-        # 3. Create the mask path
-        # Start with a path covering the whole canvas...
-        mask_path = QPainterPath()
-        mask_path.addRect(QRectF(self.rect()))
-        # ...then subtract the "holes" for each panel.
-        for item in mask_items:
-            mask_path.addRect(QRectF(item['rect']))
-
-        # Use EvenOddFill to make the inner rectangles (holes) transparent
-        mask_path.setFillRule(Qt.FillRule.OddEvenFill)
-
-        # 4. Draw the white mask layer with holes
-        painter.fillPath(mask_path, QBrush(Qt.GlobalColor.white))
-
-        # 5. Draw selection handles on top of everything
-        if self.selected_item_index != -1:
-            self._draw_selection_handles(painter, items[self.selected_item_index])
-
-        if self.current_rect_for_drawing:
-            self._draw_drawing_rect(painter)
-    def get_handle_at_pos(self, pos):
-        if self.selected_item_index != -1:
-            h = self.get_resize_handles(self.get_current_page_items()[self.selected_item_index]['rect'])
-            for handle, rect in h.items():
-                if rect.contains(pos): return handle
-        return None
-    def mousePressEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton: return
-        handle = self.get_handle_at_pos(event.pos()); item_index = self.find_item(event.pos())
-        if handle: self.interaction_mode = "resize"; self.resize_handle = handle
-        elif item_index != -1: self.interaction_mode = "move"; self.selected_item_index = item_index; self.move_offset = event.pos() - self.get_current_page_items()[item_index]['rect'].topLeft()
-        else: self.interaction_mode = "draw"; self.selected_item_index = -1; self.start_point = event.pos(); self.current_rect_for_drawing = QRect(self.start_point, event.pos())
+        if self.edit_mode_parent_id:
+            panel = self.get_item_by_id(self.edit_mode_parent_id)
+            if panel: painter.setPen(QPen(Qt.GlobalColor.cyan, 4, Qt.PenStyle.DashLine)); painter.drawRect(panel['rect'])
+        if self.selected_item_id:
+            selected_item = self.get_item_by_id(self.selected_item_id)
+            if selected_item: self._draw_selection_handles(painter, selected_item)
+        if self.current_rect_for_drawing: self._draw_drawing_rect(painter)
+    def _draw_item_recursive(self, painter, item, all_items):
+        if item['type'] == 'panel':
+            painter.setPen(QPen(Qt.GlobalColor.black, 1)); painter.drawRect(item['rect'])
+            painter.save(); painter.setClipRect(item['rect'])
+            for child_id in item.get('children', []):
+                child_item = all_items.get(child_id)
+                if child_item: self._draw_item_recursive(painter, child_item, all_items)
+            painter.restore()
+        elif item['type'] == 'image': painter.drawPixmap(item['rect'], item['pixmap'])
+        elif item['type'] == 'text': painter.setPen(QPen(item['color'])); painter.drawText(item['rect'], Qt.TextFlag.TextWordWrap, item['text'])
+    def mouseDoubleClickEvent(self, event):
+        item = self.find_top_level_item(event.pos(), item_type='panel')
+        if item:
+            if self.edit_mode_parent_id == item['id']:
+                self.edit_mode_parent_id = None
+                self.set_selected_item_id(item['id'])
+            else:
+                self.edit_mode_parent_id = item['id']
+                self.set_selected_item_id(None)
+        else:
+            self.edit_mode_parent_id = None
+            self.double_click_flag = True # Set flag to enable drawing on drag
+            self.start_point = event.pos()
         self.update()
+
+    def mousePressEvent(self, event):
+        self.double_click_flag = False # Reset flag on any single press
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = event.pos()
+        handle = self.get_handle_at_pos(pos)
+
+        if handle:
+            self.interaction_mode = "resize"
+            self.resize_handle = handle
+        else:
+            item_to_select = self.find_item_for_selection(pos)
+            if item_to_select:
+                self.set_selected_item_id(item_to_select['id'])
+                self.interaction_mode = "move"
+                self.move_offset = pos - item_to_select['rect'].topLeft()
+            else:
+                self.set_selected_item_id(None)
+                self.interaction_mode = "none" # Nothing selected or to do
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        if self.double_click_flag and (event.buttons() & Qt.MouseButton.LeftButton):
+            self.interaction_mode = "draw"
+            self.current_rect_for_drawing = QRect(self.start_point, event.pos()).normalized()
+            self.update()
+            return # Prioritize drawing after a double click
+
+        if self.interaction_mode == "resize" and self.selected_item_id: self._handle_resize(event)
+        elif self.interaction_mode == "move" and self.selected_item_id:
+            item = self.get_item_by_id(self.selected_item_id);
+            if not item: return
+            new_top_left = event.pos() - self.move_offset; delta = new_top_left - item['rect'].topLeft(); item['rect'].moveTopLeft(new_top_left)
+            if item['type'] == 'panel' and not self.edit_mode_parent_id:
+                for child_id in item['children']:
+                    child = self.get_item_by_id(child_id)
+                    if child: child['rect'].translate(delta)
+        elif self.interaction_mode == "draw":
+             self.current_rect_for_drawing = QRect(self.start_point, event.pos()).normalized()
+        self.update()
+
     def mouseReleaseEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton: return
-        if self.interaction_mode == "draw" and self.current_rect_for_drawing: self.get_current_page_items().append({'type': 'panel', 'rect': self.current_rect_for_drawing}); self.selected_item_index = len(self.get_current_page_items()) - 1
-        if self.interaction_mode == "draw" and self.start_point == event.pos() and self.find_item(event.pos()) == -1: self.selected_item_index = -1
-        self.interaction_mode = "none"; self.current_rect_for_drawing = None; self.start_point = None
-        self.update(); self._update_layer_view()
-    def clear_canvas(self): self.pages = [{'items': []}]; self.set_current_page(0)
+        if self.interaction_mode == "draw" and self.current_rect_for_drawing:
+            item_id, _ = self._create_item('panel', self.current_rect_for_drawing)
+            self.set_selected_item_id(item_id)
+
+        self.interaction_mode = "none"
+        self.current_rect_for_drawing = None
+        self.double_click_flag = False # Always reset flag on release
+        self._update_layer_view()
+        self.update()
+    def clear_canvas(self): self.pages = [{'items': {}}]; self.set_current_page(0)
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace: self.delete_selected_item()
         else: super().keyPressEvent(event)
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() or event.mimeData().hasFormat(self.MIME_TYPE): event.acceptProposedAction()
-    def mouseMoveEvent(self, event):
-        if self.interaction_mode == "resize": self._handle_resize(event)
-        elif self.interaction_mode == "move": self._handle_move(event)
-        elif self.interaction_mode == "draw": self._handle_draw(event)
-        else: self._update_cursor(event)
-        self.update()
     def _handle_resize(self, event):
-        selected_item = self.get_current_page_items()[self.selected_item_index]
-        item_rect = selected_item['rect']
-
-        # For images, maintain aspect ratio
-        if selected_item['type'] == 'image' and selected_item['pixmap']:
-            pixmap = selected_item['pixmap']
-            aspect_ratio = pixmap.width() / pixmap.height() if pixmap.height() != 0 else 1.0
-
-            # Get the fixed corner of the rectangle during resize
+        item = self.get_item_by_id(self.selected_item_id)
+        if not item: return
+        item_rect = item['rect']
+        if item['type'] == 'image' and item['pixmap']:
+            aspect_ratio = item['pixmap'].width() / item['pixmap'].height() if item['pixmap'].height() != 0 else 1.0
             if self.resize_handle == "topLeft": fixed_corner = item_rect.bottomRight()
             elif self.resize_handle == "topRight": fixed_corner = item_rect.bottomLeft()
             elif self.resize_handle == "bottomLeft": fixed_corner = item_rect.topRight()
-            else: fixed_corner = item_rect.topLeft() # bottomRight
-
-            new_pos = event.pos()
-            delta = new_pos - fixed_corner
-
-            new_width = abs(delta.x())
-            new_height = abs(delta.y())
-
-            # Adjust width or height to maintain aspect ratio
-            if new_width / aspect_ratio > new_height:
-                new_height = int(new_width / aspect_ratio)
-            else:
-                new_width = int(new_height * aspect_ratio)
-
-            # Reconstruct the rectangle based on the fixed corner
+            else: fixed_corner = item_rect.topLeft()
+            new_pos = event.pos(); delta = new_pos - fixed_corner; new_width = abs(delta.x()); new_height = abs(delta.y())
+            if new_width / aspect_ratio > new_height: new_height = int(new_width / aspect_ratio)
+            else: new_width = int(new_height * aspect_ratio)
             if self.resize_handle == "topLeft": item_rect = QRect(fixed_corner.x() - new_width, fixed_corner.y() - new_height, new_width, new_height)
             elif self.resize_handle == "topRight": item_rect = QRect(fixed_corner.x(), fixed_corner.y() - new_height, new_width, new_height)
             elif self.resize_handle == "bottomLeft": item_rect = QRect(fixed_corner.x() - new_width, fixed_corner.y(), new_width, new_height)
             else: item_rect = QRect(fixed_corner, QPoint(fixed_corner.x() + new_width, fixed_corner.y() + new_height))
-
-        # For other types, allow freeform resize
         else:
             if self.resize_handle == "topLeft": item_rect.setTopLeft(event.pos())
             elif self.resize_handle == "topRight": item_rect.setTopRight(event.pos())
             elif self.resize_handle == "bottomLeft": item_rect.setBottomLeft(event.pos())
             elif self.resize_handle == "bottomRight": item_rect.setBottomRight(event.pos())
-
-        selected_item['rect'] = item_rect.normalized()
-    def _handle_move(self, event): self.get_current_page_items()[self.selected_item_index]['rect'].moveTopLeft(event.pos() - self.move_offset)
-    def _handle_draw(self, event): self.current_rect_for_drawing = QRect(self.start_point, event.pos()).normalized()
-    def _update_cursor(self, event):
-        handle = self.get_handle_at_pos(event.pos())
-        if handle: self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor if handle in ["topLeft", "bottomRight"] else Qt.CursorShape.SizeBDiagCursor))
-        elif self.find_item(event.pos()) != -1: self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
-        else: self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
-    def _draw_image(self, painter, item):
-        """Draws an image item."""
-        painter.drawPixmap(item['rect'], item['pixmap'])
-
-    def _draw_text(self, painter, item):
-        painter.setPen(QPen(item['color']))
-        painter.drawText(item['rect'], Qt.TextFlag.TextWordWrap, item['text'])
-
+        item['rect'] = item_rect.normalized()
+    def get_handle_at_pos(self, pos):
+        if self.selected_item_id:
+            item = self.get_item_by_id(self.selected_item_id)
+            if not item: return None
+            handles = self.get_resize_handles(item['rect'])
+            for handle, rect in handles.items():
+                if rect.contains(pos): return handle
+        return None
     def _draw_selection_handles(self, painter, item):
-        item_rect = item['rect']
-        painter.setPen(QPen(Qt.GlobalColor.blue, 3, Qt.PenStyle.SolidLine))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(item_rect)
-        handles = self.get_resize_handles(item_rect)
-        painter.setBrush(QBrush(Qt.GlobalColor.blue))
-        for handle in handles.values():
-            painter.drawRect(handle)
-
+        painter.setPen(QPen(Qt.GlobalColor.blue, 3, Qt.PenStyle.SolidLine)); painter.setBrush(Qt.BrushStyle.NoBrush); painter.drawRect(item['rect']); handles = self.get_resize_handles(item['rect']); painter.setBrush(QBrush(Qt.GlobalColor.blue));
+        for handle in handles.values(): painter.drawRect(handle)
     def _draw_drawing_rect(self, painter):
-        painter.setPen(QPen(Qt.GlobalColor.red, 1, Qt.PenStyle.DashLine))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(self.current_rect_for_drawing)
-
+        painter.setPen(QPen(Qt.GlobalColor.red, 1, Qt.PenStyle.DashLine)); painter.setBrush(Qt.BrushStyle.NoBrush); painter.drawRect(self.current_rect_for_drawing)
     def get_resize_handles(self, rect):
-        h = {}
-        h["topLeft"] = QRect(rect.topLeft().x() - 4, rect.topLeft().y() - 4, 8, 8)
-        h["topRight"] = QRect(rect.topRight().x() - 4, rect.topRight().y() - 4, 8, 8)
-        h["bottomLeft"] = QRect(rect.bottomLeft().x() - 4, rect.bottomLeft().y() - 4, 8, 8)
-        h["bottomRight"] = QRect(rect.bottomRight().x() - 4, rect.bottomRight().y() - 4, 8, 8)
-        return h
+        h = {}; h["topLeft"] = QRect(rect.topLeft().x() - 4, rect.topLeft().y() - 4, 8, 8); h["topRight"] = QRect(rect.topRight().x() - 4, rect.topRight().y() - 4, 8, 8); h["bottomLeft"] = QRect(rect.bottomLeft().x() - 4, rect.bottomLeft().y() - 4, 8, 8); h["bottomRight"] = QRect(rect.bottomRight().x() - 4, rect.bottomRight().y() - 4, 8, 8); return h
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Comic Creator v2.2")
-        self.setGeometry(100, 100, 1400, 900)
-
-        # Create all manager widgets first
-        self.character_manager = CharacterManager(self)
-        self.layer_manager = LayerManager(self)
-        self.bg_remover = BackgroundRemover(self)
-        self.page_manager = PageManager(self)
-
-        # Create the central canvas widget
+        super().__init__(); self.setWindowTitle("Comic Creator v2.3"); self.setGeometry(100, 100, 1400, 900)
+        self.character_manager = CharacterManager(self); self.layer_manager = LayerManager(self); self.bg_remover = BackgroundRemover(self); self.page_manager = PageManager(self)
         self.canvas = Canvas(self, self.character_manager, self.layer_manager, self.page_manager)
         self.setCentralWidget(self.canvas)
-
-        # Now that all widgets exist, set the cross-references
-        self.layer_manager.set_canvas(self.canvas)
-        self.page_manager.set_canvas(self.canvas)
-
-        # Setup UI
-        self.toolbar = QToolBar("Main Toolbar")
-        self.addToolBar(self.toolbar)
-        self._create_toolbar()
-
-        self.menu_bar = self.menuBar()
-        self._create_menu_bar()
-        self._create_docks()
-
-        # Initial UI updates
+        self.layer_manager.set_canvas(self.canvas); self.page_manager.set_canvas(self.canvas)
+        self.toolbar = QToolBar("Main Toolbar"); self.addToolBar(self.toolbar); self._create_toolbar(); self.menu_bar = self.menuBar(); self._create_menu_bar(); self._create_docks()
         self.page_manager.update_page_list()
     def _create_docks(self):
         self.page_dock = QDockWidget("Pages", self); self.page_dock.setWidget(self.page_manager); self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.page_dock)
@@ -333,7 +466,7 @@ class MainWindow(QMainWindow):
         self.character_dock = QDockWidget("Characters", self); self.character_dock.setWidget(self.character_manager); self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.character_dock)
         self.layer_dock = QDockWidget("Layers", self); self.layer_dock.setWidget(self.layer_manager); self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.layer_dock)
     def _create_toolbar(self):
-        add_panel_action = QAction("Add Panel (Hole)", self); self.toolbar.addAction(add_panel_action)
+        add_panel_action = QAction("Add Panel (Container)", self); self.toolbar.addAction(add_panel_action)
         add_text_action = QAction("Add Text", self); add_text_action.triggered.connect(lambda: self.canvas.add_text_item(self.canvas.rect().center())); self.toolbar.addAction(add_text_action)
         self.toolbar.addSeparator(); delete_action = QAction("Delete", self); delete_action.triggered.connect(self.canvas.delete_selected_item); self.toolbar.addAction(delete_action)
     def _create_menu_bar(self):
@@ -344,26 +477,35 @@ class MainWindow(QMainWindow):
         project_data = {'characters': {}, 'pages': []}
         for name, color in self.character_manager.characters.items(): project_data['characters'][name] = color.name()
         for page in self.canvas.pages:
-            page_data = {'items': []}
-            for item in page['items']:
-                item_rect = item['rect']; item_data = {'type': item['type'], 'rect': (item_rect.x(), item_rect.y(), item_rect.width(), item_rect.height())}
-                if item['type'] == 'image':
-                    buffer = QBuffer(); buffer.open(QIODevice.OpenModeFlag.WriteOnly); item['pixmap'].save(buffer, "PNG"); image_bytes = buffer.data().data(); item_data['pixmap_base64'] = base64.b64encode(image_bytes).decode('utf-8')
-                elif item['type'] == 'text': item_data['text'] = item['text']; color = item['color']; item_data['color'] = (color.red(), color.green(), color.blue(), color.alpha())
-                page_data['items'].append(item_data)
+            page_data = {'items': {}}
+            for item_id, item in page['items'].items():
+                item_copy = item.copy()
+                item_copy['rect'] = (item['rect'].x(), item['rect'].y(), item['rect'].width(), item['rect'].height())
+                if item_copy['type'] == 'image':
+                    buffer = QBuffer(); buffer.open(QIODevice.OpenModeFlag.WriteOnly); item_copy['pixmap'].save(buffer, "PNG");
+                    item_copy['pixmap_base64'] = base64.b64encode(buffer.data().data()).decode('utf-8')
+                    del item_copy['pixmap']
+                elif item_copy['type'] == 'text':
+                    color = item_copy['color']; item_copy['color'] = (color.red(), color.green(), color.blue(), color.alpha())
+                page_data['items'][item_id] = item_copy
             project_data['pages'].append(page_data)
         return project_data
 
     def load_project_from_data(self, project_data):
         self.character_manager.load_characters(project_data.get('characters', {}))
         self.canvas.pages = []
-        for page_data in project_data.get('pages', [{'items': []}]):
-            new_page = {'items': []}
-            for item_data in page_data['items']:
-                rect = QRect(*item_data['rect']); item = {'type': item_data['type'], 'rect': rect}
-                if item_data['type'] == 'image': item['pixmap'] = QPixmap(); item['pixmap'].loadFromData(QByteArray(base64.b64decode(item_data['pixmap_base64'])), "PNG")
-                elif item_data['type'] == 'text': item['text'] = item_data['text']; item['color'] = QColor(*item_data['color'])
-                new_page['items'].append(item)
+        for page_data in project_data.get('pages', [{'items': {}}]):
+            new_page = {'items': {}}
+            for item_id, item_data in page_data['items'].items():
+                item_copy = item_data.copy()
+                item_copy['rect'] = QRect(*item_copy['rect'])
+                if item_copy['type'] == 'image':
+                    pixmap = QPixmap(); pixmap.loadFromData(QByteArray(base64.b64decode(item_copy['pixmap_base64'])))
+                    item_copy['pixmap'] = pixmap
+                    del item_copy['pixmap_base64']
+                elif item_copy['type'] == 'text':
+                    item_copy['color'] = QColor(*item_copy['color'])
+                new_page['items'][item_id] = item_copy
             self.canvas.pages.append(new_page)
         self.canvas.set_current_page(0)
 
@@ -371,7 +513,7 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Comic Project", "", "Comic Project Files (*.comicproj)")
         if not file_path: return
         try:
-            with open(file_path, 'w') as f: json.dump(self.project_data_to_dict(), f, indent=4)
+            with open(file_path, 'w') as f: json.dump(self.project_data_to_dict(), f, indent=2)
         except Exception as e: QMessageBox.critical(self, "Error", f"Failed to save project: {e}")
 
     def open_project(self):
@@ -384,21 +526,18 @@ class MainWindow(QMainWindow):
     def export_comic(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "Export Comic", "", "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg)")
         if not file_path: return
-
         reply = QMessageBox.question(self, 'Export Options', 'Export all pages?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
         if reply == QMessageBox.StandardButton.Cancel: return
-
         original_page = self.canvas.current_page_index
         if reply == QMessageBox.StandardButton.Yes:
             base_path, ext = os.path.splitext(file_path)
             for i in range(len(self.canvas.pages)):
-                self.canvas.set_current_page(i)
-                QApplication.processEvents() # Allow UI to update
+                self.canvas.set_current_page(i); QApplication.processEvents()
                 pixmap = QPixmap(self.canvas.size()); self.canvas.render(pixmap)
                 page_file_path = f"{base_path}_page_{i+1}{ext}"
                 if not pixmap.save(page_file_path): QMessageBox.warning(self, "Export Error", f"Failed to save page {i+1}."); break
             else: QMessageBox.information(self, "Export Successful", f"All pages exported successfully.")
-        else: # Export current page only
+        else:
             pixmap = QPixmap(self.canvas.size()); self.canvas.render(pixmap)
             if not pixmap.save(file_path): QMessageBox.warning(self, "Export Error", "Failed to save the comic.")
             else: QMessageBox.information(self, "Export Successful", f"Current page exported to:\n{file_path}")
