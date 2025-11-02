@@ -2,3 +2,4 @@ PyQt6
 rembg
 Pillow
 onnxruntime
+pyclipper

@@ -5,6 +5,7 @@ import io
 import os
 import uuid # For unique item IDs
 from rembg import remove
+import pyclipper
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QToolBar, QMenuBar,
@@ -14,11 +15,11 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import (
     QAction, QPainter, QPen, QBrush, QCursor,
-    QPixmap, QColor, QFontMetrics, QIcon, QDrag, QPainterPath, QFont
+    QPixmap, QColor, QFontMetrics, QIcon, QDrag, QPainterPath, QFont, QPolygon, QPolygonF
 )
 from PyQt6.QtCore import (
     Qt, QPoint, QRect, QUrl, QBuffer,
-    QByteArray, QIODevice, QThread, pyqtSignal, QMimeData, QRectF
+    QByteArray, QIODevice, QThread, pyqtSignal, QMimeData, QRectF, QPointF
 )
 
 class TextToolsWidget(QWidget):
@@ -275,14 +276,96 @@ class Canvas(QWidget):
         self.edit_mode_parent_id = None
         self.double_click_flag = False
         self.text_editor = None # Add a member for the floating text editor
+        self.split_line_points = [] # For the new split mode
+
+    def split_polygon(self, item_id, p1, p2):
+        item_to_split = self.get_item_by_id(item_id)
+        if not item_to_split or 'polygon_points' not in item_to_split:
+            return
+
+        subject_poly = [(p.x(), p.y()) for p in item_to_split['polygon_points']]
+        line_vec = p2 - p1
+        if line_vec.manhattanLength() == 0: return
+
+        normal = QPoint(line_vec.y(), -line_vec.x())
+        huge_dist = 2 * max(self.width(), self.height())
+
+        clip_p1 = p1 + normal * huge_dist
+        clip_p2 = p2 + normal * huge_dist
+        clip_p3 = p2
+        clip_p4 = p1
+        clipper_poly1 = [(p.x(), p.y()) for p in [clip_p1, clip_p2, clip_p3, clip_p4]]
+
+        pc_intersect = pyclipper.Pyclipper()
+        pc_intersect.AddPath(subject_poly, pyclipper.PT_SUBJECT, True)
+        pc_intersect.AddPath(clipper_poly1, pyclipper.PT_CLIP, True)
+        solution_intersect = pc_intersect.Execute(pyclipper.CT_INTERSECTION, pyclipper.PFT_EVENODD, pyclipper.PFT_EVENODD)
+
+        pc_diff = pyclipper.Pyclipper()
+        pc_diff.AddPath(subject_poly, pyclipper.PT_SUBJECT, True)
+        pc_diff.AddPath(clipper_poly1, pyclipper.PT_CLIP, True)
+        solution_diff = pc_diff.Execute(pyclipper.CT_DIFFERENCE, pyclipper.PFT_EVENODD, pyclipper.PFT_EVENODD)
+
+        # Before deleting, check if we have valid results
+        if not solution_intersect or not solution_diff:
+            print("Split resulted in one or zero new shapes. Aborting.")
+            return
+
+        # It's safe to delete the original item now
+        self.get_current_page_items().pop(item_id, None)
+
+        for poly_solution in [solution_intersect, solution_diff]:
+            for path in poly_solution:
+                new_poly_pts = [QPoint(int(x), int(y)) for x, y in path]
+                if len(new_poly_pts) < 3: continue
+
+                new_rect = QPolygon(new_poly_pts).boundingRect()
+                if new_rect.width() < 5 or new_rect.height() < 5: continue # Avoid tiny slivers
+
+                new_item_id, new_item = self._create_item('panel', new_rect)
+                new_item['polygon_points'] = new_poly_pts
+                self.update_item_bounding_rect(new_item_id)
+
+        self._update_layer_view()
+        self.update()
+
+    def update_item_bounding_rect(self, item_id):
+        item = self.get_item_by_id(item_id)
+        if not item or 'polygon_points' not in item:
+            return
+        points = item['polygon_points']
+        if not points:
+            item['rect'] = QRect()
+            return
+        min_x = min(p.x() for p in points)
+        min_y = min(p.y() for p in points)
+        max_x = max(p.x() for p in points)
+        max_y = max(p.y() for p in points)
+        item['rect'] = QRect(min_x, min_y, max_x - min_x, max_y - min_y)
+
+    def enter_split_mode(self):
+        self.interaction_mode = "split"
+        self.set_selected_item_id(None)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def exit_split_mode(self):
+        self.interaction_mode = "none"
+        self.split_line_points = []
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
 
     def get_current_page(self): return self.pages[self.current_page_index]
     def get_current_page_items(self): return self.get_current_page()['items']
     def get_item_by_id(self, item_id): return self.get_current_page_items().get(item_id)
     def _create_item(self, item_type, rect, data=None):
-        item_id = str(uuid.uuid4()); item = {'id': item_id, 'type': item_type, 'rect': rect, 'parent': None};
-        if item_type == 'panel': item['children'] = []
-        if data: item.update(data)
+        item_id = str(uuid.uuid4())
+        item = {'id': item_id, 'type': item_type, 'rect': rect, 'parent': None}
+        if item_type == 'panel':
+            item['children'] = []
+            # Store the panel shape as a list of QPoint objects
+            item['polygon_points'] = [rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()]
+        if data:
+            item.update(data)
         self.get_current_page_items()[item_id] = item
         return item_id, item
     def add_page(self): self.pages.append({'items': {}}); self.set_current_page(len(self.pages) - 1)
@@ -477,14 +560,28 @@ class Canvas(QWidget):
         if self.edit_mode_parent_id:
             panel = self.get_item_by_id(self.edit_mode_parent_id)
             if panel: painter.setPen(QPen(Qt.GlobalColor.cyan, 4, Qt.PenStyle.DashLine)); painter.drawRect(panel['rect'])
+
+        if self.interaction_mode == "split" and len(self.split_line_points) == 2:
+            pen = QPen(Qt.GlobalColor.red, 2, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.drawLine(self.split_line_points[0], self.split_line_points[1])
+
         if self.selected_item_id:
             selected_item = self.get_item_by_id(self.selected_item_id)
             if selected_item: self._draw_selection_handles(painter, selected_item)
         if self.current_rect_for_drawing: self._draw_drawing_rect(painter)
     def _draw_item_recursive(self, painter, item, all_items):
         if item['type'] == 'panel':
-            painter.setPen(QPen(Qt.GlobalColor.black, 1)); painter.drawRect(item['rect'])
-            painter.save(); painter.setClipRect(item['rect'])
+            # Create a QPolygonF by converting each QPoint to a QPointF
+            polygon_f = QPolygonF([QPointF(p) for p in item['polygon_points']])
+            path = QPainterPath()
+            path.addPolygon(polygon_f)
+
+            painter.setPen(QPen(Qt.GlobalColor.black, 1))
+            painter.drawPolygon(polygon_f)
+
+            painter.save()
+            painter.setClipPath(path)
             for child_id in item.get('children', []):
                 child_item = all_items.get(child_id)
                 if child_item: self._draw_item_recursive(painter, child_item, all_items)
@@ -522,6 +619,12 @@ class Canvas(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.pos()
+
+        if self.interaction_mode == "split":
+            self.split_line_points = [pos, pos]
+            self.update()
+            return
+
         handle = self.get_handle_at_pos(pos)
 
         if handle:
@@ -535,7 +638,9 @@ class Canvas(QWidget):
                 self.move_offset = pos - item_to_select['rect'].topLeft()
             else:
                 self.set_selected_item_id(None)
-                self.interaction_mode = "none" # Nothing selected or to do
+                # Important: Don't reset interaction_mode if it's already "split"
+                if self.interaction_mode != "split":
+                     self.interaction_mode = "none"
         self.update()
 
     def mouseMoveEvent(self, event):
@@ -545,20 +650,73 @@ class Canvas(QWidget):
             self.update()
             return # Prioritize drawing after a double click
 
+        if self.interaction_mode == "split":
+            if len(self.split_line_points) == 2:
+                self.split_line_points[1] = event.pos()
+                self.update()
+            return
+
         if self.interaction_mode == "resize" and self.selected_item_id: self._handle_resize(event)
         elif self.interaction_mode == "move" and self.selected_item_id:
-            item = self.get_item_by_id(self.selected_item_id);
+            item = self.get_item_by_id(self.selected_item_id)
             if not item: return
-            new_top_left = event.pos() - self.move_offset; delta = new_top_left - item['rect'].topLeft(); item['rect'].moveTopLeft(new_top_left)
+            new_top_left = event.pos() - self.move_offset
+            delta = new_top_left - item['rect'].topLeft()
+            item['rect'].moveTopLeft(new_top_left)
+
+            # If the item has polygon points, move them as well
+            if 'polygon_points' in item:
+                item['polygon_points'] = [p + delta for p in item['polygon_points']]
+
+            # If the item is a panel, move all its children too
             if item['type'] == 'panel' and not self.edit_mode_parent_id:
                 for child_id in item['children']:
                     child = self.get_item_by_id(child_id)
-                    if child: child['rect'].translate(delta)
+                    if child:
+                        child['rect'].translate(delta)
+                        # Also move polygon points of children if they exist
+                        if 'polygon_points' in child:
+                            child['polygon_points'] = [p + delta for p in child['polygon_points']]
         elif self.interaction_mode == "draw":
              self.current_rect_for_drawing = QRect(self.start_point, event.pos()).normalized()
         self.update()
 
     def mouseReleaseEvent(self, event):
+        if self.interaction_mode == "split":
+            if len(self.split_line_points) == 2:
+                p1 = self.split_line_points[0]
+                p2 = self.split_line_points[1]
+
+                # Find a panel that intersects the line's bounding box
+                line_rect = QRect(p1, p2).normalized()
+                target_item = None
+                z_ordered_ids = self.layer_manager.get_z_ordered_ids()
+                for item_id in reversed(z_ordered_ids):
+                    item = self.get_item_by_id(item_id)
+                    if item and item['type'] == 'panel' and item.get('parent') is None:
+                        if item['rect'].intersects(line_rect):
+                             # A simple rect intersection is a good first check
+                            target_item = item
+                            break
+
+                if target_item:
+                    self.split_polygon(target_item['id'], p1, p2)
+                else:
+                    # If no panel is under the line, split the whole canvas view
+                    canvas_rect = self.rect()
+                    # Create a temporary item representing the canvas
+                    temp_canvas_id = str(uuid.uuid4())
+                    self.get_current_page_items()[temp_canvas_id] = {
+                        'id': temp_canvas_id, 'type': 'panel', 'rect': canvas_rect,
+                        'polygon_points': [canvas_rect.topLeft(), canvas_rect.topRight(), canvas_rect.bottomRight(), canvas_rect.bottomLeft()]
+                    }
+                    self.split_polygon(temp_canvas_id, p1, p2)
+
+
+            self.split_line_points = []
+            self.update()
+            return
+
         if self.interaction_mode == "draw" and self.current_rect_for_drawing:
             item_id, _ = self._create_item('panel', self.current_rect_for_drawing)
             self.set_selected_item_id(item_id)
@@ -569,6 +727,49 @@ class Canvas(QWidget):
         self._update_layer_view()
         self.update()
     def clear_canvas(self): self.pages = [{'items': {}}]; self.set_current_page(0)
+
+    def wheelEvent(self, event):
+        if not self.selected_item_id:
+            return
+
+        item = self.get_item_by_id(self.selected_item_id)
+        if not item:
+            return
+
+        delta = event.angleDelta().y()
+        if item['type'] == 'image':
+            scale_factor = 1.1 if delta > 0 else 1 / 1.1
+            rect = item['rect']
+            new_width = rect.width() * scale_factor
+            new_height = rect.height() * scale_factor
+
+            center = rect.center()
+            new_rect = QRect(
+                int(center.x() - new_width / 2),
+                int(center.y() - new_height / 2),
+                int(new_width),
+                int(new_height)
+            )
+            item['rect'] = new_rect
+            self.update()
+        elif item['type'] == 'text':
+            font = item.get('font', QFont())
+            current_size = font.pointSize()
+            if current_size <= 0: current_size = 12 # Default size
+
+            if delta > 0:
+                new_size = current_size + 1
+            else:
+                new_size = max(1, current_size - 1)
+
+            font.setPointSize(new_size)
+            self.update_selected_text_item_font(font)
+            # Also update the controls in the text tools widget
+            if self.text_tools:
+                self.text_tools.update_controls(item)
+
+        event.accept()
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace: self.delete_selected_item()
         else: super().keyPressEvent(event)
@@ -577,26 +778,55 @@ class Canvas(QWidget):
     def _handle_resize(self, event):
         item = self.get_item_by_id(self.selected_item_id)
         if not item: return
-        item_rect = item['rect']
+
+        old_rect = QRect(item['rect'])
+        new_rect = QRect(item['rect']) # This is the one we'll modify
+
         if item['type'] == 'image' and item['pixmap']:
             aspect_ratio = item['pixmap'].width() / item['pixmap'].height() if item['pixmap'].height() != 0 else 1.0
-            if self.resize_handle == "topLeft": fixed_corner = item_rect.bottomRight()
-            elif self.resize_handle == "topRight": fixed_corner = item_rect.bottomLeft()
-            elif self.resize_handle == "bottomLeft": fixed_corner = item_rect.topRight()
-            else: fixed_corner = item_rect.topLeft()
+            if self.resize_handle == "topLeft": fixed_corner = new_rect.bottomRight()
+            elif self.resize_handle == "topRight": fixed_corner = new_rect.bottomLeft()
+            elif self.resize_handle == "bottomLeft": fixed_corner = new_rect.topRight()
+            else: fixed_corner = new_rect.topLeft()
             new_pos = event.pos(); delta = new_pos - fixed_corner; new_width = abs(delta.x()); new_height = abs(delta.y())
             if new_width / aspect_ratio > new_height: new_height = int(new_width / aspect_ratio)
             else: new_width = int(new_height * aspect_ratio)
-            if self.resize_handle == "topLeft": item_rect = QRect(fixed_corner.x() - new_width, fixed_corner.y() - new_height, new_width, new_height)
-            elif self.resize_handle == "topRight": item_rect = QRect(fixed_corner.x(), fixed_corner.y() - new_height, new_width, new_height)
-            elif self.resize_handle == "bottomLeft": item_rect = QRect(fixed_corner.x() - new_width, fixed_corner.y(), new_width, new_height)
-            else: item_rect = QRect(fixed_corner, QPoint(fixed_corner.x() + new_width, fixed_corner.y() + new_height))
-        else:
-            if self.resize_handle == "topLeft": item_rect.setTopLeft(event.pos())
-            elif self.resize_handle == "topRight": item_rect.setTopRight(event.pos())
-            elif self.resize_handle == "bottomLeft": item_rect.setBottomLeft(event.pos())
-            elif self.resize_handle == "bottomRight": item_rect.setBottomRight(event.pos())
-        item['rect'] = item_rect.normalized()
+            if self.resize_handle == "topLeft": new_rect = QRect(fixed_corner.x() - new_width, fixed_corner.y() - new_height, new_width, new_height)
+            elif self.resize_handle == "topRight": new_rect = QRect(fixed_corner.x(), fixed_corner.y() - new_height, new_width, new_height)
+            elif self.resize_handle == "bottomLeft": new_rect = QRect(fixed_corner.x() - new_width, fixed_corner.y(), new_width, new_height)
+            else: new_rect = QRect(fixed_corner, QPoint(fixed_corner.x() + new_width, fixed_corner.y() + new_height))
+        else: # For panels and other non-image types
+            if self.resize_handle == "topLeft": new_rect.setTopLeft(event.pos())
+            elif self.resize_handle == "topRight": new_rect.setTopRight(event.pos())
+            elif self.resize_handle == "bottomLeft": new_rect.setBottomLeft(event.pos())
+            elif self.resize_handle == "bottomRight": new_rect.setBottomRight(event.pos())
+
+        normalized_new_rect = new_rect.normalized()
+        item['rect'] = normalized_new_rect
+
+        # If the item has polygon points, scale them to match the new rect
+        if 'polygon_points' in item:
+            old_width = old_rect.width()
+            old_height = old_rect.height()
+            new_width = normalized_new_rect.width()
+            new_height = normalized_new_rect.height()
+
+            if old_width == 0: old_width = 1
+            if old_height == 0: old_height = 1
+
+            scale_x = new_width / old_width
+            scale_y = new_height / old_height
+
+            new_points = []
+            for p in item['polygon_points']:
+                # Vector from old top-left to the point
+                vec_from_origin = p - old_rect.topLeft()
+                # Scale the vector
+                scaled_vec = QPointF(vec_from_origin.x() * scale_x, vec_from_origin.y() * scale_y)
+                # Add to new top-left to get final point position
+                final_p = scaled_vec + QPointF(normalized_new_rect.topLeft())
+                new_points.append(final_p.toPoint())
+            item['polygon_points'] = new_points
     def get_handle_at_pos(self, pos):
         if self.selected_item_id:
             item = self.get_item_by_id(self.selected_item_id)
@@ -663,6 +893,13 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.layer_dock)
 
     def _create_toolbar(self):
+        # Panel splitting action
+        split_panel_action = QAction("Split Panel", self)
+        split_panel_action.setCheckable(True) # Make it a toggle-able mode
+        split_panel_action.triggered.connect(self.toggle_split_mode)
+        self.toolbar.addAction(split_panel_action)
+        self.toolbar.addSeparator()
+
         add_panel_action = QAction("Add Panel (Container)", self)
         self.toolbar.addAction(add_panel_action)
         # Add Text action is now in the TextToolsWidget
@@ -670,6 +907,12 @@ class MainWindow(QMainWindow):
         delete_action = QAction("Delete", self)
         delete_action.triggered.connect(self.canvas.delete_selected_item)
         self.toolbar.addAction(delete_action)
+
+    def toggle_split_mode(self, checked):
+        if checked:
+            self.canvas.enter_split_mode()
+        else:
+            self.canvas.exit_split_mode()
     def _create_menu_bar(self):
         file_menu = self.menu_bar.addMenu("&File"); actions = {"New": self.new_project, "Open...": self.open_project, "Save As...": self.save_project, "Export As...": self.export_comic, "Exit": self.close}; file_menu.addAction(QAction("New", self, triggered=actions["New"])); file_menu.addAction(QAction("Open...", self, triggered=actions["Open..."])); file_menu.addAction(QAction("Save As...", self, triggered=actions["Save As..."])); file_menu.addSeparator(); file_menu.addAction(QAction("Export As...", self, triggered=actions["Export As..."])); file_menu.addSeparator(); file_menu.addAction(QAction("Exit", self, triggered=actions["Exit"]))
     def new_project(self): self.canvas.clear_canvas(); self.character_manager.clear_characters()
@@ -682,6 +925,8 @@ class MainWindow(QMainWindow):
             for item_id, item in page['items'].items():
                 item_copy = item.copy()
                 item_copy['rect'] = (item['rect'].x(), item['rect'].y(), item['rect'].width(), item['rect'].height())
+                if item_copy['type'] == 'panel':
+                    item_copy['polygon_points'] = [(p.x(), p.y()) for p in item['polygon_points']]
                 if item_copy['type'] == 'image':
                     buffer = QBuffer(); buffer.open(QIODevice.OpenModeFlag.WriteOnly); item_copy['pixmap'].save(buffer, "PNG");
                     item_copy['pixmap_base64'] = base64.b64encode(buffer.data().data()).decode('utf-8')
@@ -710,6 +955,8 @@ class MainWindow(QMainWindow):
             for item_id, item_data in page_data['items'].items():
                 item_copy = item_data.copy()
                 item_copy['rect'] = QRect(*item_copy['rect'])
+                if item_copy['type'] == 'panel':
+                    item_copy['polygon_points'] = [QPoint(x, y) for x, y in item_copy['polygon_points']]
                 if item_copy['type'] == 'image':
                     pixmap = QPixmap()
                     pixmap.loadFromData(QByteArray(base64.b64decode(item_copy['pixmap_base64'])))
