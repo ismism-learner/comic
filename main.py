@@ -218,12 +218,46 @@ class Canvas(QWidget):
         else: self._update_cursor(event)
         self.update()
     def _handle_resize(self, event):
-        item_rect = self.get_current_page_items()[self.selected_item_index]['rect']
-        if self.resize_handle == "topLeft": item_rect.setTopLeft(event.pos())
-        elif self.resize_handle == "topRight": item_rect.setTopRight(event.pos())
-        elif self.resize_handle == "bottomLeft": item_rect.setBottomLeft(event.pos())
-        elif self.resize_handle == "bottomRight": item_rect.setBottomRight(event.pos())
-        self.get_current_page_items()[self.selected_item_index]['rect'] = item_rect.normalized()
+        selected_item = self.get_current_page_items()[self.selected_item_index]
+        item_rect = selected_item['rect']
+
+        # For images, maintain aspect ratio
+        if selected_item['type'] == 'image' and selected_item['pixmap']:
+            pixmap = selected_item['pixmap']
+            aspect_ratio = pixmap.width() / pixmap.height() if pixmap.height() != 0 else 1.0
+
+            # Get the fixed corner of the rectangle during resize
+            if self.resize_handle == "topLeft": fixed_corner = item_rect.bottomRight()
+            elif self.resize_handle == "topRight": fixed_corner = item_rect.bottomLeft()
+            elif self.resize_handle == "bottomLeft": fixed_corner = item_rect.topRight()
+            else: fixed_corner = item_rect.topLeft() # bottomRight
+
+            new_pos = event.pos()
+            delta = new_pos - fixed_corner
+
+            new_width = abs(delta.x())
+            new_height = abs(delta.y())
+
+            # Adjust width or height to maintain aspect ratio
+            if new_width / aspect_ratio > new_height:
+                new_height = int(new_width / aspect_ratio)
+            else:
+                new_width = int(new_height * aspect_ratio)
+
+            # Reconstruct the rectangle based on the fixed corner
+            if self.resize_handle == "topLeft": item_rect = QRect(fixed_corner.x() - new_width, fixed_corner.y() - new_height, new_width, new_height)
+            elif self.resize_handle == "topRight": item_rect = QRect(fixed_corner.x(), fixed_corner.y() - new_height, new_width, new_height)
+            elif self.resize_handle == "bottomLeft": item_rect = QRect(fixed_corner.x() - new_width, fixed_corner.y(), new_width, new_height)
+            else: item_rect = QRect(fixed_corner, QPoint(fixed_corner.x() + new_width, fixed_corner.y() + new_height))
+
+        # For other types, allow freeform resize
+        else:
+            if self.resize_handle == "topLeft": item_rect.setTopLeft(event.pos())
+            elif self.resize_handle == "topRight": item_rect.setTopRight(event.pos())
+            elif self.resize_handle == "bottomLeft": item_rect.setBottomLeft(event.pos())
+            elif self.resize_handle == "bottomRight": item_rect.setBottomRight(event.pos())
+
+        selected_item['rect'] = item_rect.normalized()
     def _handle_move(self, event): self.get_current_page_items()[self.selected_item_index]['rect'].moveTopLeft(event.pos() - self.move_offset)
     def _handle_draw(self, event): self.current_rect_for_drawing = QRect(self.start_point, event.pos()).normalized()
     def _update_cursor(self, event):
