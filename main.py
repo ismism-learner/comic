@@ -20,7 +20,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import (
     Qt, QPoint, QRect, QUrl, QBuffer,
-    QByteArray, QIODevice, QThread, pyqtSignal, QMimeData, QRectF, QPointF
+    QByteArray, QIODevice, QThread, pyqtSignal, QMimeData, QRectF, QPointF, QSize
 )
 
 class TextToolsWidget(QWidget):
