@@ -411,101 +411,53 @@ class Canvas(QWidget):
         self.double_click_flag = False
         self.text_editor = None # Add a member for the floating text editor
         self.split_line_points = [] # For the new split mode
-        self.highlighted_edge_index = -1 # For frame break mode
+
+        # For V5.0 Frame Vector Editing
+        self.hovered_vertex_index = -1
+        self.hovered_edge_index = -1
+        self.dragged_vertex_index = -1
+        self.dragged_edge_index = -1
+
+    def get_vertex_at_pos(self, pos, item):
+        if not item or 'polygon_points' not in item:
+            return -1
+        threshold = 8 # pixels
+        for i, p in enumerate(item['polygon_points']):
+            if (p - pos).manhattanLength() < threshold:
+                return i
+        return -1
 
     def get_edge_at_pos(self, pos, item):
         if not item or 'polygon_points' not in item:
             return -1
 
         points = item['polygon_points']
-        threshold = 10 # pixels
+        threshold = 8 # pixels
         for i in range(len(points)):
             p1 = points[i]
             p2 = points[(i + 1) % len(points)]
 
-            # Basic bounding box check for the line segment
             rect = QRect(p1, p2).normalized()
             if not rect.adjusted(-threshold, -threshold, threshold, threshold).contains(pos):
                 continue
 
-            # More precise distance calculation
             dx = p2.x() - p1.x()
             dy = p2.y() - p1.y()
-            if dx == 0 and dy == 0: continue # It's a point, not a line
+            if dx == 0 and dy == 0: continue
 
             t = ((pos.x() - p1.x()) * dx + (pos.y() - p1.y()) * dy) / (dx*dx + dy*dy)
 
             if 0 <= t <= 1:
-                closest_point = p1 + t * QPointF(dx, dy)
+                closest_point = QPointF(p1) + t * QPointF(dx, dy)
             elif t < 0:
-                closest_point = p1
+                closest_point = QPointF(p1)
             else: # t > 1
-                closest_point = p2
+                closest_point = QPointF(p2)
 
-            dist = (pos - closest_point.toPoint()).manhattanLength()
+            dist = (QPointF(pos) - closest_point).manhattanLength()
             if dist < threshold:
                 return i
         return -1
-
-    def _calculate_frame_break_geometry(self, panel_item, all_items):
-        if not panel_item or panel_item['type'] != 'panel':
-            return []
-
-        broken_edges_indices = [i for i, broken in enumerate(panel_item.get('broken_edges', [])) if broken]
-        if not broken_edges_indices:
-            return []
-
-        release_regions = []
-        points = panel_item['polygon_points']
-        for i in broken_edges_indices:
-            p1 = points[i]
-            p2 = points[(i + 1) % len(points)]
-
-            line_vec = p2 - p1
-            if line_vec.manhattanLength() == 0: continue
-
-            # Create a large rectangle "leaking" out from the edge
-            normal = QPoint(line_vec.y(), -line_vec.x())
-            huge_dist = 2 * max(self.width(), self.height())
-
-            # Points for the "release" clipper polygon
-            rp1 = p1 + normal * huge_dist
-            rp2 = p2 + normal * huge_dist
-            clipper_poly = [(p.x(), p.y()) for p in [p1, p2, rp2, rp1]]
-            release_regions.append(clipper_poly)
-
-        if not release_regions:
-            return []
-
-        # Combine all release regions into one big clipper path
-        pc_union = pyclipper.Pyclipper()
-        pc_union.AddPaths(release_regions, pyclipper.PT_CLIP, True)
-        combined_release_region = pc_union.Execute(pyclipper.CT_UNION, pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO)
-
-        frame_break_geometries = []
-        for child_id in panel_item.get('children', []):
-            child_item = all_items.get(child_id)
-            if not child_item or child_item['type'] != 'image':
-                continue
-
-            child_rect = child_item['rect']
-            child_poly = [
-                (child_rect.left(), child_rect.top()),
-                (child_rect.right(), child_rect.top()),
-                (child_rect.right(), child_rect.bottom()),
-                (child_rect.left(), child_rect.bottom())
-            ]
-
-            pc = pyclipper.Pyclipper()
-            pc.AddPath(child_poly, pyclipper.PT_SUBJECT, True)
-            pc.AddPaths(combined_release_region, pyclipper.PT_CLIP, True)
-
-            solution = pc.Execute(pyclipper.CT_INTERSECTION, pyclipper.PFT_EVENODD, pyclipper.PFT_EVENODD)
-
-            if solution:
-                frame_break_geometries.append({'item': child_item, 'geometries': solution})
-
-        return frame_break_geometries
 
     def split_polygon(self, item_id, p1, p2):
         item_to_split = self.get_item_by_id(item_id)
@@ -553,8 +505,6 @@ class Canvas(QWidget):
 
                 new_item_id, new_item = self._create_item('panel', new_rect)
                 new_item['polygon_points'] = new_poly_pts
-                # Initialize broken edges for the new split panel
-                new_item['broken_edges'] = [False] * len(new_poly_pts)
                 self.update_item_bounding_rect(new_item_id)
 
         self._update_layer_view()
@@ -585,11 +535,12 @@ class Canvas(QWidget):
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
-    def enter_frame_break_mode(self):
-        self.interaction_mode = "frame_break"
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+    def enter_edit_frame_mode(self):
+        self.interaction_mode = "edit_frame"
+        self.setCursor(Qt.CursorShape.CrossCursor) # A cross cursor is good for precision editing
+        self.update()
 
-    def exit_frame_break_mode(self):
+    def exit_edit_frame_mode(self):
         self.interaction_mode = "none"
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
@@ -604,8 +555,6 @@ class Canvas(QWidget):
             item['children'] = []
             # Store the panel shape as a list of QPoint objects
             item['polygon_points'] = [rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()]
-            # State for each edge, corresponding to the polygon points
-            item['broken_edges'] = [False] * len(item['polygon_points'])
         if data:
             item.update(data)
         self.get_current_page_items()[item_id] = item
@@ -823,58 +772,16 @@ class Canvas(QWidget):
 
         self.set_selected_item_id(None)
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter = QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), Qt.GlobalColor.white)
         items_dict = self.get_current_page_items()
 
-        frame_break_items = []
-
-        # First pass: draw all normal items and collect frame break items
         for item in items_dict.values():
-            if item.get('parent') is not None:
-                continue
+            if item.get('parent') is None: self._draw_item_recursive(painter, item, items_dict)
 
-            is_frame_break_panel = (
-                item['type'] == 'panel' and
-                True in item.get('broken_edges', [])
-            )
-
-            if is_frame_break_panel:
-                frame_break_items.append(item)
-            else:
-                self._draw_item_recursive(painter, item, items_dict)
-
-        # Second pass: draw frame break items with their effects
-        for panel_item in frame_break_items:
-            # 1. Calculate the geometries that should appear outside the frame
-            break_geometries = self._calculate_frame_break_geometry(panel_item, items_dict)
-
-            # 2. Draw the panel and its contents normally (clipped)
-            self._draw_item_recursive(painter, panel_item, items_dict)
-
-            # 3. Draw the "out of frame" parts
-            if break_geometries:
-                painter.save()
-                for geo_info in break_geometries:
-                    child_item = geo_info['item']
-                    geometries = geo_info['geometries']
-
-                    path = QPainterPath()
-                    for poly in geometries:
-                        path.addPolygon(QPolygonF([QPointF(p[0], p[1]) for p in poly]))
-
-                    painter.setClipPath(path)
-                    # We draw the child item again, but now clipped only by our "break" geometry
-                    self._draw_item_recursive(painter, child_item, items_dict)
-                painter.restore()
-
-        # Draw overlays
         if self.edit_mode_parent_id:
             panel = self.get_item_by_id(self.edit_mode_parent_id)
-            if panel:
-                painter.setPen(QPen(Qt.GlobalColor.cyan, 4, Qt.PenStyle.DashLine))
-                painter.drawRect(panel['rect'])
+            if panel: painter.setPen(QPen(Qt.GlobalColor.cyan, 4, Qt.PenStyle.DashLine)); painter.drawRect(panel['rect'])
 
         if self.interaction_mode == "split" and len(self.split_line_points) == 2:
             pen = QPen(Qt.GlobalColor.red, 2, Qt.PenStyle.DashLine)
@@ -883,38 +790,21 @@ class Canvas(QWidget):
 
         if self.selected_item_id:
             selected_item = self.get_item_by_id(self.selected_item_id)
-            if selected_item:
-                self._draw_selection_handles(painter, selected_item)
-
-        if self.current_rect_for_drawing:
-            self._draw_drawing_rect(painter)
+            if selected_item: self._draw_selection_handles(painter, selected_item)
+        if self.current_rect_for_drawing: self._draw_drawing_rect(painter)
     def _draw_item_recursive(self, painter, item, all_items):
         if item['type'] == 'panel':
             points = item['polygon_points']
+            polygon_f = QPolygonF([QPointF(p) for p in points])
             path = QPainterPath()
-            path.addPolygon(QPolygonF([QPointF(p) for p in points]))
+            path.addPolygon(polygon_f)
 
             painter.save()
             painter.setClipPath(path)
 
-            # Draw each edge with a color indicating its state
-            for i in range(len(points)):
-                p1 = points[i]
-                p2 = points[(i + 1) % len(points)]
+            painter.setPen(QPen(Qt.GlobalColor.black, 1))
+            painter.drawPolygon(polygon_f)
 
-                is_broken = item.get('broken_edges', [])[i]
-                is_highlighted = (self.interaction_mode == 'frame_break' and
-                                  self.selected_item_id == item['id'] and
-                                  self.highlighted_edge_index == i)
-
-                if is_highlighted:
-                    pen = QPen(Qt.GlobalColor.red, 3, Qt.PenStyle.SolidLine)
-                    painter.setPen(pen)
-                    painter.drawLine(p1, p2)
-                elif not is_broken: # Only draw non-broken edges
-                    pen = QPen(Qt.GlobalColor.black, 1)
-                    painter.setPen(pen)
-                    painter.drawLine(p1, p2)
             for child_id in item.get('children', []):
                 child_item = all_items.get(child_id)
                 if child_item: self._draw_item_recursive(painter, child_item, all_items)
@@ -1010,13 +900,12 @@ class Canvas(QWidget):
             self.update()
             return
 
-        if self.interaction_mode == "frame_break":
-            if self.selected_item_id and self.highlighted_edge_index != -1:
-                item = self.get_item_by_id(self.selected_item_id)
-                if item and 'broken_edges' in item:
-                    current_state = item['broken_edges'][self.highlighted_edge_index]
-                    item['broken_edges'][self.highlighted_edge_index] = not current_state
-                    self.update()
+        if self.interaction_mode == "edit_frame":
+            if self.hovered_vertex_index != -1:
+                self.dragged_vertex_index = self.hovered_vertex_index
+            elif self.hovered_edge_index != -1:
+                self.dragged_edge_index = self.hovered_edge_index
+                self.drag_start_position = pos
             return
 
         handle = self.get_handle_at_pos(pos)
@@ -1050,12 +939,46 @@ class Canvas(QWidget):
                 self.update()
             return
 
-        if self.interaction_mode == "frame_break":
-            self.highlighted_edge_index = -1
-            if self.selected_item_id:
+        if self.interaction_mode == "edit_frame":
+            if self.dragged_vertex_index != -1 and self.selected_item_id:
                 item = self.get_item_by_id(self.selected_item_id)
-                self.highlighted_edge_index = self.get_edge_at_pos(event.pos(), item)
-            self.update()
+                if item:
+                    item['polygon_points'][self.dragged_vertex_index] = event.pos()
+                    self.update_item_bounding_rect(self.selected_item_id)
+                    self.update()
+            elif self.dragged_edge_index != -1 and self.selected_item_id:
+                item = self.get_item_by_id(self.selected_item_id)
+                if item:
+                    points = item['polygon_points']
+                    p1_idx = self.dragged_edge_index
+                    p2_idx = (self.dragged_edge_index + 1) % len(points)
+                    p1 = points[p1_idx]
+                    p2 = points[p2_idx]
+
+                    edge_vec = p2 - p1
+                    normal_vec = QPointF(edge_vec.y(), -edge_vec.x())
+                    normal_vec.normalize()
+
+                    drag_vec = event.pos() - self.drag_start_position
+
+                    dot_product = QPointF.dotProduct(QPointF(drag_vec), normal_vec)
+                    move_vec = normal_vec * dot_product
+
+                    item['polygon_points'][p1_idx] = p1 + move_vec.toPoint()
+                    item['polygon_points'][p2_idx] = p2 + move_vec.toPoint()
+
+                    self.drag_start_position = event.pos() # Update start for next delta
+                    self.update_item_bounding_rect(self.selected_item_id)
+                    self.update()
+            else: # Only update hover state if not dragging
+                self.hovered_vertex_index = -1
+                self.hovered_edge_index = -1
+                if self.selected_item_id:
+                    item = self.get_item_by_id(self.selected_item_id)
+                    self.hovered_vertex_index = self.get_vertex_at_pos(event.pos(), item)
+                    if self.hovered_vertex_index == -1:
+                        self.hovered_edge_index = self.get_edge_at_pos(event.pos(), item)
+                self.update()
             return
 
         if self.interaction_mode == "resize" and self.selected_item_id: self._handle_resize(event)
@@ -1123,7 +1046,14 @@ class Canvas(QWidget):
             item_id, _ = self._create_item('panel', self.current_rect_for_drawing)
             self.set_selected_item_id(item_id)
 
-        self.interaction_mode = "none"
+        if self.dragged_vertex_index != -1:
+            self.dragged_vertex_index = -1
+        if self.dragged_edge_index != -1:
+            self.dragged_edge_index = -1
+
+        # Reset interaction mode if not in a persistent mode
+        if self.interaction_mode not in ["split", "edit_frame"]:
+            self.interaction_mode = "none"
         self.current_rect_for_drawing = None
         self.double_click_flag = False # Always reset flag on release
         self._update_layer_view()
@@ -1238,8 +1168,28 @@ class Canvas(QWidget):
                 if rect.contains(pos): return handle
         return None
     def _draw_selection_handles(self, painter, item):
-        painter.setPen(QPen(Qt.GlobalColor.blue, 3, Qt.PenStyle.SolidLine)); painter.setBrush(Qt.BrushStyle.NoBrush); painter.drawRect(item['rect']); handles = self.get_resize_handles(item['rect']); painter.setBrush(QBrush(Qt.GlobalColor.blue));
-        for handle in handles.values(): painter.drawRect(handle)
+        painter.setPen(QPen(Qt.GlobalColor.blue, 3, Qt.PenStyle.SolidLine)); painter.setBrush(Qt.BrushStyle.NoBrush); painter.drawRect(item['rect'])
+
+        # In edit_frame mode, draw vertices and highlight hovered edge
+        if self.interaction_mode == "edit_frame" and item['type'] == 'panel':
+            points = item['polygon_points']
+            # Draw vertices
+            painter.setBrush(QBrush(Qt.GlobalColor.red))
+            for p in points:
+                painter.drawRect(p.x() - 4, p.y() - 4, 8, 8)
+
+            # Highlight hovered edge
+            if self.hovered_edge_index != -1:
+                p1 = points[self.hovered_edge_index]
+                p2 = points[(self.hovered_edge_index + 1) % len(points)]
+                painter.setPen(QPen(Qt.GlobalColor.red, 3, Qt.PenStyle.SolidLine))
+                painter.drawLine(p1, p2)
+        else:
+             # Draw standard resize handles if not in frame edit mode
+            handles = self.get_resize_handles(item['rect'])
+            painter.setBrush(QBrush(Qt.GlobalColor.blue))
+            for handle in handles.values(): painter.drawRect(handle)
+
     def _draw_drawing_rect(self, painter):
         painter.setPen(QPen(Qt.GlobalColor.red, 1, Qt.PenStyle.DashLine)); painter.setBrush(Qt.BrushStyle.NoBrush); painter.drawRect(self.current_rect_for_drawing)
     def get_resize_handles(self, rect):
@@ -1305,11 +1255,11 @@ class MainWindow(QMainWindow):
         split_panel_action.triggered.connect(self.toggle_split_mode)
         self.toolbar.addAction(split_panel_action)
 
-        # Frame break action
-        frame_break_action = QAction("Frame Break", self)
-        frame_break_action.setCheckable(True)
-        frame_break_action.triggered.connect(self.toggle_frame_break_mode)
-        self.toolbar.addAction(frame_break_action)
+        # Frame editing action
+        edit_frame_action = QAction("Edit Frame", self)
+        edit_frame_action.setCheckable(True)
+        edit_frame_action.triggered.connect(self.toggle_edit_frame_mode)
+        self.toolbar.addAction(edit_frame_action)
         self.toolbar.addSeparator()
 
         add_panel_action = QAction("Add Panel (Container)", self)
@@ -1326,11 +1276,11 @@ class MainWindow(QMainWindow):
         else:
             self.canvas.exit_split_mode()
 
-    def toggle_frame_break_mode(self, checked):
+    def toggle_edit_frame_mode(self, checked):
         if checked:
-            self.canvas.enter_frame_break_mode()
+            self.canvas.enter_edit_frame_mode()
         else:
-            self.canvas.exit_frame_break_mode()
+            self.canvas.exit_edit_frame_mode()
 
     def _create_menu_bar(self):
         file_menu = self.menu_bar.addMenu("&File"); actions = {"New": self.new_project, "Open...": self.open_project, "Save As...": self.save_project, "Export As...": self.export_comic, "Exit": self.close}; file_menu.addAction(QAction("New", self, triggered=actions["New"])); file_menu.addAction(QAction("Open...", self, triggered=actions["Open..."])); file_menu.addAction(QAction("Save As...", self, triggered=actions["Save As..."])); file_menu.addSeparator(); file_menu.addAction(QAction("Export As...", self, triggered=actions["Export As..."])); file_menu.addSeparator(); file_menu.addAction(QAction("Exit", self, triggered=actions["Exit"]))
@@ -1346,7 +1296,6 @@ class MainWindow(QMainWindow):
                 item_copy['rect'] = (item['rect'].x(), item['rect'].y(), item['rect'].width(), item['rect'].height())
                 if item_copy['type'] == 'panel':
                     item_copy['polygon_points'] = [(p.x(), p.y()) for p in item['polygon_points']]
-                    item_copy['broken_edges'] = item['broken_edges']
                 if item_copy['type'] == 'image':
                     buffer = QBuffer(); buffer.open(QIODevice.OpenModeFlag.WriteOnly); item_copy['pixmap'].save(buffer, "PNG");
                     item_copy['pixmap_base64'] = base64.b64encode(buffer.data().data()).decode('utf-8')
@@ -1381,9 +1330,6 @@ class MainWindow(QMainWindow):
                 item_copy['rect'] = QRect(*item_copy['rect'])
                 if item_copy['type'] == 'panel':
                     item_copy['polygon_points'] = [QPoint(x, y) for x, y in item_copy['polygon_points']]
-                    # For backward compatibility with older project files
-                    if 'broken_edges' not in item_copy:
-                        item_copy['broken_edges'] = [False] * len(item_copy['polygon_points'])
                 if item_copy['type'] == 'image':
                     pixmap = QPixmap()
                     pixmap.loadFromData(QByteArray(base64.b64decode(item_copy['pixmap_base64'])))
